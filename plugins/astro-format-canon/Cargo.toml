@@ -1,0 +1,17 @@
+[package]
+name = "astro-format-canon"
+description = "Canon CR2/CR3 reader for astro-stacker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+# cdylib is what the host loads; rlib is what `cargo test` needs to reach the
+# internals.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+astro-plugin-abi.workspace = true
+rawler.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "astro-core"
+description = "Frame model and plugin host for astro-stacker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+astro-plugin-abi.workspace = true
+libloading.workspace = true
+log.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "astro-plugin-abi"
+description = "Stable C ABI shared by the astro-stacker host and its format plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Deliberately dependency-free: a plugin author should be able to depend on this
+# crate without pulling in anything else, and a non-Rust plugin only needs the
+# layouts described in `abi`.
+[dependencies]

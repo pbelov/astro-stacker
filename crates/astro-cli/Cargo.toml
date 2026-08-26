@@ -1,0 +1,20 @@
+[package]
+name = "astro-cli"
+description = "Command line front end for astro-stacker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "astro-stacker"
+path = "src/main.rs"
+
+[dependencies]
+astro-core.workspace = true
+astro-plugin-abi.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+env_logger.workspace = true
+log.workspace = true

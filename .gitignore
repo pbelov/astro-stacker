@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Tauri / frontend (added in a later milestone)
+node_modules/
+dist/
+
+# Local test data: raw frames are large and not ours to redistribute
+/testdata
+/samples

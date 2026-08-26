@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/astro-plugin-abi",
+    "crates/astro-core",
+    "crates/astro-cli",
+    "plugins/astro-format-canon",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+authors = ["Pavel Belov <psbelov@gmail.com>"]
+
+[workspace.dependencies]
+astro-plugin-abi = { path = "crates/astro-plugin-abi" }
+astro-core = { path = "crates/astro-core" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+libloading = "0.9"
+log = "0.4"
+rawler = "0.7"
+rayon = "1"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
