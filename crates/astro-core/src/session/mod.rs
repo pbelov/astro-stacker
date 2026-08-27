@@ -19,12 +19,14 @@ pub mod compat;
 pub mod kind;
 pub mod scan;
 pub mod sets;
+pub mod stats;
 
 pub use compat::{
     GeometryKey, Incompatibility, Mismatch, Pairing, Property, Rect, Severity, Tolerances,
 };
 pub use kind::{Basis, FrameKind, FrameRole, Inference};
 pub use scan::{Progress, RoleRule, ScanOptions, ScanReport, scan, scan_with_progress};
+pub use stats::{ColourStats, FrameStats, Uniformity, measure};
 pub use sets::{
     BlockedRole, CalibrationMatch, ExposureBucket, ExposureSpan, FrameSet, GainBucket, MatchQuality,
     Partition, PartitionKey, SetId, SetKey, Split, StackPlan, Suspicion, best_match,

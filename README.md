@@ -5,13 +5,15 @@ frames into one deep image. In the spirit of DeepSkyStacker, but faster, and
 built so that every image format is a plugin rather than a branch in a switch
 statement.
 
-**Status: 0.1.2 — it reads a session.** Point it at a night's folder and it
-groups the frames into stackable sets, matches darks, flats and biases to the
-lights, and names everything that does not fit. It does not stack anything yet.
+**Status: 0.2.0 — it reads a session and measures a frame.** Point it at a
+night's folder and it groups the frames into stackable sets, matches darks,
+flats and biases to the lights, and names everything that does not fit. It does
+not stack anything yet.
 
-Verified against real frames from a Canon 5D Mark IV, 60Da, R5 and R5 Mark II:
-all four decode at 190–200 Mpx/s, which puts a 45-megapixel CR3 at a quarter of
-a second.
+Verified against real frames from a Canon 5D Mark IV, a modified 60D, an R5 and
+an R5 Mark II, and against one complete 370-frame session: all decode at
+190–200 Mpx/s, which puts a 45-megapixel CR3 at a quarter of a second, and a
+whole night is read and grouped in 0.13 s.
 
 ## What is here
 
@@ -42,6 +44,13 @@ Describe one frame, and decode it to confirm the pixels really read:
 
 ```bash
 cargo run --release --bin astro-stacker -- info --decode path/to/IMG_0001.CR3
+```
+
+Measure what the pixels say — where each colour sits between black and white,
+how much is clipped, and how evenly the frame is lit:
+
+```bash
+cargo run --release --bin astro-stacker -- measure path/to/flats/*.CR2
 ```
 
 Read a whole session:

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use astro_core::session::{ColourStats, FrameStats, measure};
 use astro_core::{OpenFrame, PluginHost, Samples, cfa_pattern_name, default_plugin_dirs};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
 use scan_command::ScanArgs;
@@ -39,6 +40,15 @@ enum Command {
     /// Read a session: group frames into stackable sets, match calibration to
     /// them, and say what does not fit.
     Scan(ScanArgs),
+
+    /// Decode frames and report what the pixels say: where each colour sits
+    /// between black and white, how much is clipped, and how evenly the frame
+    /// is lit.
+    Measure {
+        /// Raw files to measure.
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
+    },
 
     /// Describe frames: sensor layout, calibration levels, shooting parameters.
     Info {
@@ -76,6 +86,7 @@ fn main() -> Result<()> {
             let scan = matches.subcommand_matches("scan").expect("the scan subcommand was matched");
             scan_command::run(&host, args, scan)
         }
+        Command::Measure { files } => measure_frames(&host, files),
         Command::Info { files, decode } => describe_frames(&host, files, *decode),
     }
 }
@@ -119,6 +130,94 @@ fn list_plugins(host: &PluginHost) -> Result<()> {
         println!("  library    {}", plugin.path().display());
     }
     Ok(())
+}
+
+/// Decodes each frame and prints the numbers, without judging them.
+///
+/// Thresholds — what counts as too dim, too clipped, too uneven — need arguing
+/// against real frames before they are worth encoding. The measurements do not:
+/// whole-frame minimum and maximum turned out to be useless on real data,
+/// because hot and cold photosites pin both ends of every frame alike.
+fn measure_frames(host: &PluginHost, files: &[PathBuf]) -> Result<()> {
+    let mut failures = 0;
+
+    for (index, file) in files.iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+        println!("{}", file.display());
+        match measure_frame(host, file) {
+            Ok(()) => {}
+            Err(error) => {
+                failures += 1;
+                println!("  error      {error:#}");
+            }
+        }
+    }
+
+    if failures > 0 {
+        bail!("{failures} of {} frames could not be measured", files.len());
+    }
+    Ok(())
+}
+
+fn measure_frame(host: &PluginHost, file: &Path) -> Result<()> {
+    let frame = host.open(file).with_context(|| format!("opening {}", file.display()))?;
+    let samples = frame.decode().with_context(|| format!("decoding {}", file.display()))?;
+    let Some(stats) = measure(&samples, frame.layout()) else {
+        bail!("this frame is not a single-component mosaic, so it cannot be measured per colour");
+    };
+    print_stats(&stats);
+    Ok(())
+}
+
+fn print_stats(stats: &FrameStats) {
+    const NAMES: [&str; 4] = ["R", "G", "B", "E"];
+
+    let present = |pick: &dyn Fn(&ColourStats) -> String| {
+        stats
+            .colours
+            .iter()
+            .enumerate()
+            .filter_map(|(index, colour)| colour.map(|c| format!("{} {}", NAMES[index], pick(&c))))
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+
+    // The headline: where the median sits between black and white. A flat is
+    // conventionally shot at a third to a half; a bias sits on the black point.
+    println!("  level      {}", present(&|c| percent(c.level)));
+    println!("  median     {}", present(&|c| format!("{:.0}", c.median)));
+    println!("  spread     {}", present(&|c| format!("{:.0}", c.spread)));
+    println!("  clipped    {}", present(&|c| percent(c.clipped)));
+
+    if let Some(dominant) = stats.dominant() {
+        println!("  levels     black {} white {}", number(dominant.black), number(dominant.white));
+    }
+
+    let blocks = stats.uniformity.blocks;
+    let row = |start: usize| {
+        blocks[start..start + 3]
+            .iter()
+            .map(|value| if value.is_finite() { format!("{value:.2}") } else { "-".to_owned() })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    // Only meaningful on a flat, where it measures the light source rather than
+    // the sensor: a ramp here is imprinted on every frame divided by it.
+    println!("  uniformity {} / {} / {}   ramp {}", row(0), row(3), row(6), ratio(stats.uniformity.ramp()));
+}
+
+fn percent(value: f32) -> String {
+    if value.is_finite() { format!("{:.1}%", value * 100.0) } else { "-".to_owned() }
+}
+
+fn number(value: f32) -> String {
+    if value.is_finite() { format!("{value:.0}") } else { "not recorded".to_owned() }
+}
+
+fn ratio(value: f32) -> String {
+    if value.is_finite() { format!("{value:.2}:1") } else { "-".to_owned() }
 }
 
 fn describe_frames(host: &PluginHost, files: &[PathBuf], decode: bool) -> Result<()> {
