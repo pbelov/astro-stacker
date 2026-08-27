@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-use super::compat::{self, GeometryKey, Incompatibility, Mismatch, Pairing, Tolerances};
-use super::{BodyKey, FrameId, FrameKind, FrameRecord, GroupId, Session};
+use super::compat::{self, GeometryKey, Incompatibility, Mismatch, Pairing, Property, Tolerances};
+use super::{BodyKey, FrameId, FrameKind, FrameRecord, Session, may_draw_from};
 
 /// Handle to one set within one [`Partition`].
 ///
@@ -96,9 +96,19 @@ impl ExposureSpan {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PartitionKey {
     pub kind: FrameKind,
-    pub group: GroupId,
+    /// The group's *name*, not its [`GroupId`][super::GroupId]. Ids are handed
+    /// out in the order groups were first seen, so a key carrying one would
+    /// rebind to a different night the moment the same session is described
+    /// with the flags in another order. Every other field here is derived from
+    /// the file; this one has to be too.
+    pub group: Box<str>,
     pub body: BodyKey,
     pub geometry: GeometryKey,
+    /// Gain is here even though mixed-ISO lights integrate together perfectly
+    /// well, because a set is the unit calibration is matched to: one set
+    /// spanning two gains could only be given one master dark, and it would be
+    /// wrong for half of it. Merging the results back into one image is a
+    /// stacking concern, and DeepSkyStacker draws the line in the same place.
     pub gain: GainBucket,
 }
 
@@ -195,6 +205,10 @@ pub struct CalibrationMatch {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockedRole {
     pub kind: FrameKind,
+    /// The set the candidates were judged against. Not always the lights: a
+    /// dark flat is measured against the flats, and a report that did not say so
+    /// would show the flats' exposure as what the lights "expected".
+    pub against: SetId,
     pub candidates: Vec<(SetId, Incompatibility)>,
 }
 
@@ -275,7 +289,12 @@ pub struct Partition {
     pub unassigned: Vec<FrameId>,
     pub splits: Vec<Split>,
     pub suspicions: Vec<Suspicion>,
-    by_key: HashMap<SetKey, SetId>,
+    /// `None` marks a key two sets share, which happens when a bucket contains
+    /// more than one frame of unrecorded exposure: each becomes its own set and
+    /// every one of them keys as `ExposureSpan { Unknown, Unknown }`. Answering
+    /// with whichever was inserted last would bind a caller's cached work to an
+    /// arbitrary one of them.
+    by_key: HashMap<SetKey, Option<SetId>>,
 }
 
 impl Partition {
@@ -286,7 +305,7 @@ impl Partition {
     /// Rebinds a set after a re-partition. The only safe way to carry anything
     /// across two calls to [`Session::partition`].
     pub fn set_by_key(&self, key: &SetKey) -> Option<SetId> {
-        self.by_key.get(key).copied()
+        self.by_key.get(key).copied().flatten()
     }
 
     pub fn plan_for(&self, lights: SetId) -> Option<&StackPlan> {
@@ -317,7 +336,7 @@ pub fn partition(session: &Session, tolerances: &Tolerances) -> Partition {
             unassigned.push(id);
             continue;
         };
-        buckets.entry(partition_key(kind, record)).or_default().push(id);
+        buckets.entry(partition_key(session, kind, record)).or_default().push(id);
     }
 
     // Sorted so a report lists sets in the same order every run, whatever order
@@ -331,7 +350,11 @@ pub fn partition(session: &Session, tolerances: &Tolerances) -> Partition {
             let id = SetId(result.sets.len() as u32);
             let span = exposure_span(session, &run);
             let set_key = SetKey { partition: key.clone(), exposure: span };
-            result.by_key.insert(set_key.clone(), id);
+            result
+                .by_key
+                .entry(set_key.clone())
+                .and_modify(|slot| *slot = None)
+                .or_insert(Some(id));
             result.sets.push(FrameSet { id, key: set_key, members: in_capture_order(session, run) });
         }
     }
@@ -343,20 +366,20 @@ pub fn partition(session: &Session, tolerances: &Tolerances) -> Partition {
     result
 }
 
-fn partition_key(kind: FrameKind, record: &FrameRecord) -> PartitionKey {
+fn partition_key(session: &Session, kind: FrameKind, record: &FrameRecord) -> PartitionKey {
     PartitionKey {
         kind,
-        group: record.group,
+        group: session.group_name(record.group).into(),
         body: record.body.clone(),
         geometry: GeometryKey::from_layout(&record.layout),
         gain: GainBucket::from_iso(record.info.iso),
     }
 }
 
-fn sort_key(key: &PartitionKey) -> (FrameKind, GroupId, String, u32, u32, GainBucket) {
+fn sort_key(key: &PartitionKey) -> (FrameKind, String, String, u32, u32, GainBucket) {
     (
         key.kind,
-        key.group,
+        key.group.to_string(),
         key.body.display(),
         key.geometry.width,
         key.geometry.height,
@@ -511,7 +534,7 @@ fn resolve(
     // not look the same: in the second case the user believes the stack was
     // calibrated.
     if found.is_none() && !refused.is_empty() {
-        blocked.push(BlockedRole { kind, candidates: refused });
+        blocked.push(BlockedRole { kind, against: against.id, candidates: refused });
     }
     found
 }
@@ -542,7 +565,7 @@ pub fn best_match(
     let mut refused: Vec<(SetId, Incompatibility)> = Vec::new();
 
     for candidate in partition.sets_of(kind) {
-        if !against.key.partition.group.may_draw_from(candidate.key.partition.group) {
+        if !may_draw_from(&against.key.partition.group, &candidate.key.partition.group) {
             continue;
         }
         let source = &session[candidate.representative(session)];
@@ -577,10 +600,15 @@ pub fn best_match(
 
     let source = &session[best.representative(session)];
     let mismatches = compat::differences(target, source, pairing, tolerances);
-    // A rule that could not run is a third state, not a difference. Counting an
-    // `Unrecorded` finding as a mismatch would make `Exact` unreachable on this
-    // project's target hardware, where sensor temperature is never recorded.
-    let differs = mismatches.iter().any(|m| !matches!(m, Mismatch::Unrecorded { .. }));
+    // A rule that could not run is a third state, not a difference — but only
+    // sensor temperature is discounted here, and only because no Canon body
+    // records it, so counting it would make `Exact` unreachable on the hardware
+    // this project targets. Any other unrun rule keeps `Exact` off the table:
+    // "nothing differed" must not be printed over a comparison that never
+    // happened.
+    let differs = mismatches.iter().any(|finding| {
+        !matches!(finding, Mismatch::Unrecorded { property: Property::SensorTemperature })
+    });
     let quality = if !differs {
         MatchQuality::Exact
     } else if admitted.len() == 1 {
@@ -633,6 +661,15 @@ const FLAT_NEEDS_DARK_FLATS_SECONDS: f64 = 1.0;
 /// 1/8000 s bias from a 1/250 s flat filed in the wrong folder.
 const BIAS_EXPOSURE_RATIO: f64 = 4.0;
 
+/// Below this exposure, the in-camera dark subtraction test is not run.
+///
+/// The test is a ratio, and at short exposures ordinary overhead reaches it: a
+/// 20-second sub on an intervalometer set to a round 45 seconds trips a
+/// 1.8x-2.4x window with nothing wrong. Canon's long-exposure noise reduction
+/// is a long-exposure feature, so restricting the test to long exposures costs
+/// nothing real.
+const IN_CAMERA_DARK_MIN_EXPOSURE_SECONDS: f64 = 60.0;
+
 fn find_suspicions(
     session: &Session,
     partition: &Partition,
@@ -684,7 +721,11 @@ fn find_suspicions(
 
     for set in &partition.sets {
         let kind = set.kind();
-        if !kind.is_calibration() {
+        // Flats only. The twelve-hour threshold is about the optical train —
+        // dust and focus at one moment — and a dark has no optical train. A dark
+        // run spanning two nights is ordinary practice, and warning about it
+        // would train the user to ignore the line that matters.
+        if !matches!(kind, FrameKind::Flat | FrameKind::DarkFlat) {
             continue;
         }
         if let Some(span) = capture_span(session, set)
@@ -727,6 +768,13 @@ fn in_camera_dark_subtraction(session: &Session, set: &FrameSet) -> Option<Suspi
     intervals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median = intervals[intervals.len() / 2];
 
+    // Below a minute, ordinary per-frame overhead — download, dither, settle —
+    // is itself comparable to the exposure, so the ratio alone would flag a
+    // perfectly normal cadence. Long-exposure noise reduction is also neither
+    // common nor distinguishable down there.
+    if exposure < IN_CAMERA_DARK_MIN_EXPOSURE_SECONDS {
+        return None;
+    }
     // Twice the exposure, plus readout and a little slack for the intervalometer.
     (median > exposure * 1.8 && median < exposure * 2.4).then_some(
         Suspicion::ProbableInCameraDarkSubtraction {
@@ -954,9 +1002,11 @@ mod tests {
         assert_eq!(partition.plans.len(), 2);
         assert!(partition.plans.iter().all(|plan| plan.bias.is_some()), "the library serves both");
 
-        let group_of = |plan: &StackPlan| partition.set(plan.lights).unwrap().key.partition.group;
-        let monday_plan = partition.plans.iter().find(|p| group_of(p) == monday).unwrap();
-        let tuesday_plan = partition.plans.iter().find(|p| group_of(p) == tuesday).unwrap();
+        let group_of = |plan: &StackPlan| {
+            partition.set(plan.lights).unwrap().key.partition.group.to_string()
+        };
+        let monday_plan = partition.plans.iter().find(|p| group_of(p) == "mon").unwrap();
+        let tuesday_plan = partition.plans.iter().find(|p| group_of(p) == "tue").unwrap();
         assert!(monday_plan.dark.is_some());
         assert!(tuesday_plan.dark.is_none(), "Monday's darks do not reach Tuesday");
         assert!(tuesday_plan.blocked.is_empty(), "and are not reported as refused either");
@@ -1064,6 +1114,133 @@ mod tests {
         let partition = partitioned(&session);
         assert_eq!(partition.unassigned.len(), 1);
         assert_eq!(partition.sets_of(FrameKind::Light).map(FrameSet::len).sum::<usize>(), 5);
+    }
+
+    #[test]
+    fn two_sets_that_share_a_key_are_not_answered_for() {
+        // Every unrecorded exposure becomes its own set, and every one of them
+        // keys as ExposureSpan { Unknown, Unknown }. Handing back whichever was
+        // inserted last would bind a caller to an arbitrary one of them.
+        let mut session = Session::new();
+        for name in ["a.cr3", "b.cr3"] {
+            let mut odd = light();
+            odd.exposure_seconds = None;
+            testing::assigned(&mut session, FrameKind::Light, name, odd);
+        }
+
+        let partition = partitioned(&session);
+        assert_eq!(partition.sets_of(FrameKind::Light).count(), 2);
+        let key = partition.sets_of(FrameKind::Light).next().unwrap().key.clone();
+        assert_eq!(partition.set_by_key(&key), None, "an ambiguous key answers for nothing");
+    }
+
+    #[test]
+    fn exact_is_not_claimed_when_the_exposure_could_not_be_compared() {
+        // Sensor temperature is discounted because no Canon body records it.
+        // An unrecorded exposure is a different matter: it is the property a
+        // dark is ranked on.
+        let mut session = Session::new();
+        testing::run(&mut session, FrameKind::Light, "L", 5, light());
+        let mut dark = light();
+        dark.exposure_seconds = None;
+        testing::assigned(&mut session, FrameKind::Dark, "D.cr3", dark);
+
+        let partition = partitioned(&session);
+        let matched = partition.plans[0].dark.as_ref().expect("still matched, never refused");
+        assert_ne!(matched.quality, MatchQuality::Exact);
+    }
+
+    #[test]
+    fn a_blocked_dark_flat_records_that_it_was_judged_against_the_flats() {
+        let mut session = Session::new();
+        testing::run(&mut session, FrameKind::Light, "L", 5, light());
+        testing::run(&mut session, FrameKind::Flat, "F", 10, flat());
+        // Right exposure for the flats, wrong gain, so it is refused.
+        testing::run(&mut session, FrameKind::DarkFlat, "DF", 10, info(1.0 / 60.0, 1600.0));
+
+        let partition = partitioned(&session);
+        let plan = &partition.plans[0];
+        let blocked = plan
+            .blocked
+            .iter()
+            .find(|role| role.kind == FrameKind::DarkFlat)
+            .expect("the refused dark flats are named");
+        let against = partition.set(blocked.against).expect("a real set");
+        assert_eq!(against.kind(), FrameKind::Flat, "never judged against the lights");
+    }
+
+    #[test]
+    fn a_short_sub_on_a_round_intervalometer_is_not_called_in_camera_dark_subtraction() {
+        // 20 s subs every 45 s: ordinary download, dither and settle, and a
+        // ratio of 2.25 that the test used to fire on.
+        let mut session = Session::new();
+        for index in 0..6 {
+            let mut frame = info(20.0, 1600.0);
+            frame.capture_time_unix = Some(1_787_834_096 + 45 * index);
+            testing::assigned(&mut session, FrameKind::Light, &format!("L{index}.CR3"), frame);
+        }
+
+        let partition = partitioned(&session);
+        assert!(
+            !partition
+                .suspicions
+                .iter()
+                .any(|s| matches!(s, Suspicion::ProbableInCameraDarkSubtraction { .. })),
+            "{:?}",
+            partition.suspicions
+        );
+    }
+
+    #[test]
+    fn a_dark_run_across_two_nights_is_not_flagged_as_a_flat_would_be() {
+        // The twelve-hour threshold is about dust and focus. A dark has neither,
+        // and a dark library shot over several nights is ordinary practice.
+        let mut session = Session::new();
+        testing::run(&mut session, FrameKind::Light, "L", 5, light());
+        for night in 0..3 {
+            let mut when = light();
+            when.capture_time_unix = Some(1_787_834_096 + night * 86_400);
+            testing::assigned(&mut session, FrameKind::Dark, &format!("D{night}.CR3"), when);
+        }
+
+        let partition = partitioned(&session);
+        assert!(
+            !partition
+                .suspicions
+                .iter()
+                .any(|s| matches!(s, Suspicion::CalibrationSpansNights { .. })),
+            "{:?}",
+            partition.suspicions
+        );
+    }
+
+    #[test]
+    fn a_set_key_survives_the_flags_being_typed_in_another_order() {
+        // Group ids are handed out in first-seen order, so a key carrying one
+        // would rebind to the other night when the same session is described
+        // the other way round.
+        let key_for = |first: &str, second: &str| {
+            let mut session = Session::new();
+            let a = session.intern_group(first);
+            let b = session.intern_group(second);
+            for (group, name) in [(a, first), (b, second)] {
+                testing::assigned_in(
+                    &mut session,
+                    group,
+                    FrameKind::Light,
+                    &format!("{name}.cr3"),
+                    light(),
+                );
+            }
+            let partition = partition(&session, &Tolerances::default());
+            let mut keys: Vec<String> = partition
+                .sets_of(FrameKind::Light)
+                .map(|set| set.key.partition.group.to_string())
+                .collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(key_for("mon", "tue"), key_for("tue", "mon"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Turning a list of paths into a [`Session`].
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
@@ -112,10 +113,25 @@ pub fn scan_with_progress(
     let started = Instant::now();
     let extensions = host.supported_extensions();
 
+    // Canonicalised once, up front. The filesystem is case-insensitive on
+    // Windows and `Path::starts_with` is not, so `--darks D:/astro/darks` would
+    // otherwise fail to claim a file the walk discovered as `D:/Astro/Darks/..`,
+    // and every dark in that folder would be filed as unassigned. Canonicalising
+    // the roots gives every discovered path one spelling, so the rule matching,
+    // the sort and the dedup all agree.
+    let rules: Vec<RoleRule> = options
+        .rules
+        .iter()
+        .map(|rule| RoleRule {
+            root: std::fs::canonicalize(&rule.root).unwrap_or_else(|_| rule.root.clone()),
+            ..rule.clone()
+        })
+        .collect();
+
     let mut candidates = Vec::new();
     let mut rejected = Vec::new();
-    for rule in &options.rules {
-        collect(&rule.root, options.recursive, &extensions, &mut candidates)?;
+    for rule in &rules {
+        collect(&rule.root, options.recursive, &extensions, &mut candidates, &mut rejected)?;
     }
     candidates.sort();
     candidates.dedup();
@@ -126,31 +142,32 @@ pub fn scan_with_progress(
 
     let total = candidates.len();
     let counter = std::sync::atomic::AtomicUsize::new(0);
-    let open_all = || {
-        candidates
-            .par_iter()
-            .enumerate()
-            .map(|(index, path)| {
-                let outcome = match (index, &first) {
-                    // Reuse the frame that sized the pool rather than opening it
-                    // twice.
-                    (0, Some(opened)) => Ok(opened.clone()),
-                    _ => open_one(host, path),
-                };
-                let done = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                progress(Progress { opened: done, total });
-                (path.clone(), outcome)
-            })
-            .collect::<Vec<_>>()
+    let open_at = |index: usize, path: &PathBuf| {
+        let outcome = match (index, &first) {
+            // Reuse the frame that sized the pool rather than opening it twice.
+            (0, Some(opened)) => Ok(opened.clone()),
+            _ => open_one(host, path),
+        };
+        let done = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        progress(Progress { opened: done, total });
+        (path.clone(), outcome)
     };
 
-    let opened = match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
-        Ok(pool) => pool.install(open_all),
-        // A pool that will not build is not a reason to refuse to scan; it only
-        // costs speed.
+    // A pool that will not build is not a reason to refuse to scan; it only
+    // costs speed. The fallback runs genuinely serially: falling through to
+    // `par_iter` outside an `install` would run on rayon's global pool, whose
+    // thread count owes nothing to the memory budget this scan was sized
+    // against — and the number reported to the user would be a fiction.
+    let mut workers = workers;
+    type Opened = Vec<(PathBuf, std::result::Result<Scanned, Rejection>)>;
+    let opened: Opened = match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
+        Ok(pool) => {
+            pool.install(|| candidates.par_iter().enumerate().map(|(i, p)| open_at(i, p)).collect())
+        }
         Err(err) => {
             log::warn!("scanning on one thread: {err}");
-            open_all()
+            workers = 1;
+            candidates.iter().enumerate().map(|(i, p)| open_at(i, p)).collect()
         }
     };
 
@@ -159,12 +176,12 @@ pub fn scan_with_progress(
         match outcome {
             Ok(scanned) => {
                 if let Some(existing) = session.find_by_content(scanned.fingerprint) {
-                    rejected.push((path, Rejection::Duplicate { of: existing }));
+                    rejected.push((presentable(&path), Rejection::Duplicate { of: existing }));
                     continue;
                 }
-                insert(&mut session, options, &path, scanned);
+                insert(&mut session, options, &rules, &path, scanned);
             }
-            Err(reason) => rejected.push((path, reason)),
+            Err(reason) => rejected.push((presentable(&path), reason)),
         }
     }
 
@@ -197,8 +214,14 @@ fn open_one(host: &PluginHost, path: &Path) -> std::result::Result<Scanned, Reje
     }
 }
 
-fn insert(session: &mut Session, options: &ScanOptions, path: &Path, scanned: Scanned) -> FrameId {
-    let rule = deepest_rule(&options.rules, path);
+fn insert(
+    session: &mut Session,
+    options: &ScanOptions,
+    rules: &[RoleRule],
+    path: &Path,
+    scanned: Scanned,
+) -> FrameId {
+    let rule = deepest_rule(rules, path);
     let group = match rule.and_then(|rule| rule.group_name.as_deref()) {
         Some(name) => session.intern_group(name),
         None => GroupId::MAIN,
@@ -211,7 +234,8 @@ fn insert(session: &mut Session, options: &ScanOptions, path: &Path, scanned: Sc
         None => FrameRole::Unassigned { inference: Inference::NoEvidence },
     };
 
-    let directory = session.intern_directory(path.parent().unwrap_or(Path::new(".")));
+    let directory =
+        session.intern_directory(&presentable(path.parent().unwrap_or(Path::new("."))));
     let plugin = session.intern_plugin(&scanned.plugin);
     let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
 
@@ -300,6 +324,7 @@ fn collect(
     recursive: bool,
     extensions: &[String],
     into: &mut Vec<PathBuf>,
+    unreadable: &mut Vec<(PathBuf, Rejection)>,
 ) -> Result<()> {
     let metadata =
         std::fs::metadata(root).map_err(|source| Error::Io { path: root.to_owned(), source })?;
@@ -310,14 +335,41 @@ fn collect(
         return Ok(());
     }
 
+    // A junction or a symlink can point back up the tree, and a walk that did
+    // not remember where it had been would never finish.
+    let mut visited: HashSet<PathBuf> = HashSet::new();
     let mut directories = vec![root.to_owned()];
     while let Some(directory) = directories.pop() {
-        let entries = std::fs::read_dir(&directory)
-            .map_err(|source| Error::Io { path: directory.clone(), source })?;
+        let identity = std::fs::canonicalize(&directory).unwrap_or_else(|_| directory.clone());
+        if !visited.insert(identity) {
+            continue;
+        }
+
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            // Only the root the user named is worth failing for. A subdirectory
+            // that cannot be listed - a permission, a disconnected share - is one
+            // more thing to report, not a reason to throw away every frame
+            // already found.
+            Err(err) => {
+                unreadable.push((
+                    presentable(&directory),
+                    Rejection::Unreadable { detail: err.to_string() },
+                ));
+                continue;
+            }
+        };
+
         for entry in entries.flatten() {
             let path = entry.path();
             let Ok(kind) = entry.file_type() else { continue };
-            if kind.is_dir() {
+            // Windows reports a junction and a directory symlink as neither a
+            // file nor a directory, so testing `is_dir` alone would drop a whole
+            // subtree without a word.
+            let is_directory = kind.is_dir()
+                || (kind.is_symlink()
+                    && std::fs::metadata(&path).is_ok_and(|target| target.is_dir()));
+            if is_directory {
                 if recursive {
                     directories.push(path);
                 }
@@ -328,6 +380,21 @@ fn collect(
     }
     Ok(())
 }
+
+/// Removes the verbatim prefix that `canonicalize` adds on Windows.
+///
+/// The long and the short spelling open the same file; only one of them belongs
+/// in a report. A verbatim UNC path keeps its prefix, because shortening that
+/// one changes which share it names.
+fn presentable(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    match text.strip_prefix(VERBATIM_PREFIX) {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path.to_owned(),
+    }
+}
+
+const VERBATIM_PREFIX: &str = "\\\\?\\";
 
 fn has_supported_extension(path: &Path, extensions: &[String]) -> bool {
     let Some(extension) = path.extension().and_then(OsStr::to_str) else {

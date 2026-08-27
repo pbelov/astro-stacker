@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
 use astro_core::PluginHost;
-use astro_core::session::{FrameKind, RoleRule, ScanOptions, Tolerances, scan_with_progress};
+use astro_core::session::{
+    FrameKind, MAIN_GROUP, RoleRule, ScanOptions, Tolerances, scan_with_progress,
+};
 use clap::{ArgMatches, Args};
 
 use crate::report;
@@ -62,6 +64,16 @@ pub struct ScanArgs {
 }
 
 pub fn run(host: &PluginHost, args: &ScanArgs, matches: &ArgMatches) -> Result<()> {
+    // Reserved rather than merely special: a group by this name is handed the
+    // id whose calibration serves every other group, so accepting it would
+    // silently drop the isolation the user asked for.
+    if let Some(reserved) = args.group.iter().find(|name| name.eq_ignore_ascii_case(MAIN_GROUP)) {
+        bail!(
+            "--group {reserved} is reserved. Calibration named before any --group already serves \
+             every group, so a bias library needs no group at all; call this one something else."
+        );
+    }
+
     let rules = rules_from(args, matches);
     if rules.is_empty() {
         bail!(

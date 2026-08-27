@@ -99,9 +99,16 @@ The two exceptions are deliberate and both are about gain: a dark or a bias at
 the wrong ISO is a hard refusal, because gain scales read noise and the
 fixed-pattern amplitude together, there is no benign reason for the mismatch,
 and the result is a faintly wrong background nobody traces back to the
-calibration frames. Within a light set, by contrast, mixed ISO is fine —
-normalisation removes a linear scale factor, and DeepSkyStacker stacks mixed-ISO
-lights into one image too.
+calibration frames.
+
+Two lights at different ISO, by contrast, are never *refused* — normalisation
+removes a linear scale factor. They still land in separate sets, because a set
+is the unit calibration is matched to and a dark must match ISO exactly: one set
+spanning two gains could only be given one master dark, and it would be wrong
+for half of it. DeepSkyStacker draws the same line, building a separate task per
+ISO and summing them into one output image. Summing is a stacking concern, and
+stacking is not built yet; when it is, one integration will draw from several
+light sets.
 
 ### A rule that could not run is a third state
 

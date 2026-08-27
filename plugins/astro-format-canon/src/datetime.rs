@@ -27,12 +27,17 @@ pub fn parse_exif(text: &str) -> Option<i64> {
         return None;
     }
 
-    let year: i64 = text[0..4].parse().ok()?;
-    let month: u32 = text[5..7].parse().ok()?;
-    let day: u32 = text[8..10].parse().ok()?;
-    let hour: i64 = text[11..13].parse().ok()?;
-    let minute: i64 = text[14..16].parse().ok()?;
-    let second: i64 = text[17..19].parse().ok()?;
+    // `get` rather than direct slicing. The separator checks above prove the
+    // *start* of each field is a character boundary, but nothing proves the end
+    // of the seconds field is: a corrupted byte that arrives as U+FFFD occupies
+    // three bytes, and slicing through it would panic in a function documented
+    // to return None for anything malformed.
+    let year: i64 = text.get(0..4)?.parse().ok()?;
+    let month: u32 = text.get(5..7)?.parse().ok()?;
+    let day: u32 = text.get(8..10)?.parse().ok()?;
+    let hour: i64 = text.get(11..13)?.parse().ok()?;
+    let minute: i64 = text.get(14..16)?.parse().ok()?;
+    let second: i64 = text.get(17..19)?.parse().ok()?;
 
     if !(1..=12).contains(&month) || !(1..=days_in_month(year, month)).contains(&day) {
         return None;
@@ -116,6 +121,16 @@ mod tests {
         assert_eq!(parse_exif("2026:08:27 12:60:00"), None);
         // An unset camera clock, which must not read as year zero.
         assert_eq!(parse_exif("0000:00:00 00:00:00"), None);
+    }
+
+    #[test]
+    fn a_corrupted_byte_returns_none_rather_than_panicking() {
+        // A replacement character occupies three bytes, so the seconds field
+        // would end mid-character. This function promises None for anything
+        // malformed, and a panic is not None.
+        assert_eq!(parse_exif("2026:08:27 12:34:\u{fffd}"), None);
+        assert_eq!(parse_exif("2026:08:27 12:34:5\u{fffd}"), None);
+        assert_eq!(parse_exif("\u{fffd}026:08:27 12:34:56"), None);
     }
 
     #[test]

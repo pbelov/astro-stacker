@@ -64,11 +64,23 @@ pub struct GroupId(u16);
 
 impl GroupId {
     pub const MAIN: GroupId = GroupId(0);
+}
 
-    /// Whether a frame in `self` may draw calibration from `source`.
-    pub fn may_draw_from(self, source: GroupId) -> bool {
-        source == Self::MAIN || source == self
-    }
+/// The name of the group whose calibration serves every other group.
+///
+/// Reserved: [`Session::intern_group`] hands `GroupId::MAIN` to anyone who asks
+/// for it by name, so a user group called `main` would silently become the
+/// global one. Callers that take a group name from a person must refuse this
+/// one rather than let the isolation the user asked for be dropped.
+pub const MAIN_GROUP: &str = "main";
+
+/// Whether frames in `target` may draw calibration from `source`.
+///
+/// By name rather than by [`GroupId`], because ids are assigned in the order
+/// groups were first seen. A key carrying one would rebind to a different night
+/// when the same session is described with the flags in another order.
+pub fn may_draw_from(target: &str, source: &str) -> bool {
+    source == MAIN_GROUP || source == target
 }
 
 /// Index into the session's directory table. Never exposed as a path directly.
@@ -289,10 +301,15 @@ pub enum Suggestion {
 
 impl Suggestion {
     /// The command line that would act on this suggestion, where one exists.
+    ///
+    /// `None` when nothing is known about the frames. Filling in `--lights`
+    /// there would be a guess wearing the clothes of a suggestion, and the one
+    /// place the tool refuses to guess is exactly the place a paste-able line is
+    /// most tempting.
     pub fn command_fragment(&self) -> Option<String> {
         match self {
             Self::AssignDirectory { directory, proposed, .. } => {
-                let flag = proposed.map_or("--lights", FrameKind::assign_flag);
+                let flag = proposed.map(FrameKind::assign_flag)?;
                 Some(format!("{flag} \"{}\"", directory.display()))
             }
             // There is no single right answer here; the user has to say which
@@ -525,18 +542,22 @@ mod tests {
 
     #[test]
     fn the_main_group_is_reachable_from_every_group() {
-        let mut session = Session::new();
-        let main = session.intern_group("main");
-        let monday = session.intern_group("mon");
-        let tuesday = session.intern_group("tue");
-
-        assert_eq!(main, GroupId::MAIN);
         // A bias library in the main group serves every night...
-        assert!(monday.may_draw_from(main));
-        assert!(tuesday.may_draw_from(main));
+        assert!(may_draw_from("mon", MAIN_GROUP));
+        assert!(may_draw_from("tue", MAIN_GROUP));
         // ...but Monday's darks stay with Monday.
-        assert!(!tuesday.may_draw_from(monday));
-        assert!(monday.may_draw_from(monday));
+        assert!(!may_draw_from("tue", "mon"));
+        assert!(may_draw_from("mon", "mon"));
+    }
+
+    #[test]
+    fn the_main_group_name_is_reserved() {
+        // Asking for it by name hands back the global group, which is why a
+        // caller taking the name from a person has to refuse it.
+        let mut session = Session::new();
+        assert_eq!(session.intern_group(MAIN_GROUP), GroupId::MAIN);
+        assert_eq!(session.intern_group("mon"), GroupId(1));
+        assert_eq!(session.group_name(GroupId::MAIN), MAIN_GROUP);
     }
 
     #[test]
@@ -556,5 +577,17 @@ mod tests {
             proposed: Some(FrameKind::Dark),
         };
         assert_eq!(suggestion.command_fragment().as_deref(), Some("--darks \"D:/astro/M31/darks\""));
+    }
+
+    #[test]
+    fn a_suggestion_with_nothing_to_suggest_offers_no_command() {
+        // The one place the tool refuses to guess is exactly where a paste-able
+        // line is most tempting, and `--lights` would be a guess in disguise.
+        let suggestion = Suggestion::AssignDirectory {
+            directory: PathBuf::from("D:/astro/M31"),
+            frames: 9,
+            proposed: None,
+        };
+        assert_eq!(suggestion.command_fragment(), None);
     }
 }

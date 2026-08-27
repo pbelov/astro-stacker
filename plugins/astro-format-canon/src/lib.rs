@@ -206,10 +206,12 @@ fn copy_black_level(raw: &RawImage, layout: &mut ImageLayout) {
         }
     } else {
         // A grid we cannot express is still better collapsed to one level than
-        // dropped: calibration needs *a* black point.
+        // dropped: calibration needs *a* black point. But when there is no level
+        // at all, say so — NaN rather than zero, because a fabricated pedestal
+        // gets subtracted from real data with nothing looking wrong.
         layout.black_level_width = 1;
         layout.black_level_height = 1;
-        layout.black_level[0] = black.levels.first().map_or(0.0, Rational::as_f32);
+        layout.black_level[0] = black.levels.first().map_or(f32::NAN, Rational::as_f32);
     }
 }
 

@@ -248,7 +248,11 @@ impl Default for ImageLayout {
             active_height: 0,
             black_level_width: 1,
             black_level_height: 1,
-            black_level: [0.0; CFA_MAX_CELLS],
+            // NaN, like every other float in this struct, so that "the file did
+            // not record a black level" is representable. A zero here would be
+            // a fabricated pedestal, and a fabricated pedestal is subtracted
+            // from real data without anything looking wrong.
+            black_level: [f32::NAN; CFA_MAX_CELLS],
             white_level: [f32::NAN; 4],
             wb_coeffs: [f32::NAN; 4],
             xyz_to_cam: [f32::NAN; 12],

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use astro_core::session::{
     CalibrationMatch, FrameKind, FrameSet, MatchQuality, Partition, Rejection, ScanReport, Session,
-    Severity, Suggestion, Suspicion,
+    MAIN_GROUP, Severity, Suggestion, Suspicion,
 };
 
 use crate::format;
@@ -27,7 +27,7 @@ pub fn render(report: &ScanReport, partition: &Partition) {
 
     for plan_index in 0..partition.plans.len() {
         println!();
-        print_plan(session, partition, plan_index);
+        print_plan(partition, plan_index);
     }
 
     print_splits(partition);
@@ -36,11 +36,11 @@ pub fn render(report: &ScanReport, partition: &Partition) {
     print_rejected(report);
 }
 
-fn print_plan(session: &Session, partition: &Partition, plan_index: usize) {
+fn print_plan(partition: &Partition, plan_index: usize) {
     let plan = &partition.plans[plan_index];
     let Some(lights) = partition.set(plan.lights) else { return };
 
-    print_set_heading(session, lights);
+    print_set_heading(lights);
 
     for (kind, matched) in plan.calibration() {
         let Some(set) = partition.set(matched.set) else { continue };
@@ -62,7 +62,23 @@ fn print_plan(session: &Session, partition: &Partition, plan_index: usize) {
     // Roles the user supplied frames for that could not be used. Never silent:
     // otherwise the user believes the stack was calibrated.
     for blocked in &plan.blocked {
-        println!("  {:<10} refused, and nothing else was available", blocked.kind.name());
+        // Naming the set it was judged against matters for a dark flat, which is
+        // measured against the flats: without it the flats' exposure would read
+        // as what the lights expected.
+        let against = partition.set(blocked.against).map_or_else(
+            String::new,
+            |set| {
+                if set.id == plan.lights {
+                    String::new()
+                } else {
+                    format!(" against set {} ({})", set.id.index(), set.kind().name())
+                }
+            },
+        );
+        println!(
+            "  {:<10} refused{against}, and nothing else was available",
+            blocked.kind.name()
+        );
         for (set, reason) in &blocked.candidates {
             let count = partition.set(*set).map_or(0, FrameSet::len);
             println!("    {count} frames: {reason}");
@@ -85,7 +101,7 @@ fn print_plan(session: &Session, partition: &Partition, plan_index: usize) {
     }
 }
 
-fn print_set_heading(session: &Session, set: &FrameSet) {
+fn print_set_heading(set: &FrameSet) {
     let key = &set.key;
     let exposure = key
         .exposure
@@ -95,7 +111,7 @@ fn print_set_heading(session: &Session, set: &FrameSet) {
         astro_core::session::GainBucket::Iso(iso) => format!("ISO {iso}"),
         astro_core::session::GainBucket::Unknown => "ISO unknown".to_owned(),
     };
-    let group = session.group_name(key.partition.group);
+    let group = key.partition.group.as_ref();
 
     println!(
         "set {}  {}  {}  {}  {}  {}  {} frames{}",
@@ -106,7 +122,7 @@ fn print_set_heading(session: &Session, set: &FrameSet) {
         exposure,
         gain,
         set.len(),
-        if group == "main" { String::new() } else { format!("  [{group}]") }
+        if group == MAIN_GROUP { String::new() } else { format!("  [{group}]") }
     );
 }
 
@@ -162,8 +178,8 @@ fn describe_suspicion(suspicion: &Suspicion) -> String {
             format::exposure(*shortest)
         ),
         Suspicion::FlatNeedsDarkFlats { set, seconds } => format!(
-            "set {} holds {} flats long enough to collect dark current, and no dark flats matched. \
-             A bias alone will not remove it.",
+            "set {} holds flats of {}, long enough to collect dark current, and no dark flats \
+             matched. A bias alone will not remove it.",
             set.index(),
             format::exposure(*seconds)
         ),
@@ -178,8 +194,9 @@ fn describe_suspicion(suspicion: &Suspicion) -> String {
             )
         }
         Suspicion::CalibrationSpansNights { set, kind, span_seconds } => format!(
-            "set {} holds {}s shot across {:.0} hours. A {} records the optical train at a moment; \
-             averaging several nights averages several dust patterns into one that matches none.",
+            "set {} holds {} frames shot across {:.0} hours. A {} records the optical train at a \
+             moment; averaging several nights averages several dust patterns and focus positions \
+             into one that matches none of them.",
             set.index(),
             kind.name(),
             *span_seconds as f64 / 3600.0,
@@ -218,12 +235,18 @@ fn print_unassigned(session: &Session, partition: &Partition) {
 
         let proposed = proposal_for(session, partition, &directory);
         let suggestion =
-            Suggestion::AssignDirectory { directory, frames: names.len(), proposed };
-        if let Some(fragment) = suggestion.command_fragment() {
-            match proposed {
-                Some(kind) => println!("    looks like {}s: {fragment}", kind.name()),
-                None => println!("    name them: {fragment}"),
+            Suggestion::AssignDirectory { directory: directory.clone(), frames: names.len(), proposed };
+        match (proposed, suggestion.command_fragment()) {
+            (Some(kind), Some(fragment)) => {
+                println!("    looks like a {}: {fragment}", kind.name());
             }
+            // Nothing was proposed, so there is no line to paste — only the
+            // menu. Printing one flag here would be the guess the whole model
+            // refuses to make.
+            _ => println!(
+                "    name them with one of --lights --darks --flats --biases --dark-flats \"{}\"",
+                directory.display()
+            ),
         }
     }
 }
@@ -256,11 +279,34 @@ fn print_rejected(report: &ScanReport) {
         return;
     }
     let mut not_frames = Vec::new();
+    let mut duplicates = Vec::new();
     let mut problems = Vec::new();
     for (path, reason) in &report.rejected {
         match reason {
             Rejection::NotAFrame => not_frames.push(path),
+            // A duplicate was read perfectly. It is set aside because its bytes
+            // are already in the session, which is not a failure to report under
+            // a heading that says one.
+            Rejection::Duplicate { of } => duplicates.push((path, *of)),
             _ => problems.push((path, reason)),
+        }
+    }
+
+    if !duplicates.is_empty() {
+        println!();
+        println!("already in the session  {} files", duplicates.len());
+        for (path, of) in duplicates.iter().take(10) {
+            // Resolved to a path here rather than in `Rejection`'s Display,
+            // which has no session to consult and can only print an index.
+            let original = report
+                .session
+                .path(*of)
+                .map_or_else(|| String::from("another file"), |p| p.display().to_string());
+            println!("  {}", path.display());
+            println!("    same bytes as {original}");
+        }
+        if duplicates.len() > 10 {
+            println!("  and {} more", duplicates.len() - 10);
         }
     }
 

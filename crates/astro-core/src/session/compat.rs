@@ -169,6 +169,12 @@ pub enum Mismatch {
     Orientation { expected: u32, found: u32 },
     CameraModel { expected: String, found: String },
     OpticalTrain { property: Property, expected: Option<f64>, found: Option<f64> },
+    /// Two different lenses, named. Kept apart from [`Mismatch::OpticalTrain`]
+    /// because that variant carries numbers and a lens is a name — folding it in
+    /// would render a real difference as "not recorded against not recorded",
+    /// which is precisely the state this module reserves for a rule that could
+    /// not run.
+    LensModel { expected: String, found: String },
     /// Seconds between the calibration frames and the lights they would
     /// calibrate.
     Elapsed { seconds: i64 },
@@ -184,7 +190,13 @@ impl Mismatch {
     pub fn severity(&self) -> Severity {
         match self {
             Self::SensorTemperature { severity, .. } => *severity,
-            Self::Exposure { .. } | Self::Gain { .. } | Self::Elapsed { .. } => Severity::Warning,
+            // A named lens that differs is the strongest metadata evidence that
+            // a flat does not belong to these lights, so it is louder than the
+            // numeric properties beside it.
+            Self::Exposure { .. }
+            | Self::Gain { .. }
+            | Self::Elapsed { .. }
+            | Self::LensModel { .. } => Severity::Warning,
             Self::BlackLevel { .. }
             | Self::WhiteLevel { .. }
             | Self::Orientation { .. }
@@ -221,6 +233,7 @@ impl std::fmt::Display for Mismatch {
                 };
                 write!(f, "{property} {} against {}", show(found), show(expected))
             }
+            Self::LensModel { expected, found } => write!(f, "lens {found} against {expected}"),
             Self::Elapsed { seconds } => {
                 let hours = *seconds as f64 / 3600.0;
                 write!(
@@ -272,6 +285,13 @@ impl std::fmt::Display for Property {
 /// carries no information and refusing it for one is a bug; a dark's entire
 /// content is a function of exposure and temperature, so its exposure carries
 /// everything. Every check therefore names the pairing it is checking.
+///
+/// [`Pairing::SameStack`] and [`Pairing::BiasToFlat`] are declared and not yet
+/// constructed outside the tests: this milestone reports on a plan rather than
+/// executing one, so no bias is ever subtracted from a flat. They are here
+/// because the vocabulary is what has to be complete — calibration will
+/// construct them, and finding the rule missing at that point is worse than an
+/// unused variant now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pairing {
     /// Two frames destined for the same integration.
@@ -511,11 +531,17 @@ pub fn differences(
 
     // Reported, never refused, wherever it is not already a hard rule: on a
     // CMOS body ISO is analogue gain, and normalisation removes a linear scale.
-    if !pairing.gain_must_match()
-        && let (Some(a), Some(b)) = (expected.info.iso, found.info.iso)
-        && (a - b).abs() > f64::EPSILON
-    {
-        findings.push(Mismatch::Gain { expected: a, found: b });
+    if !pairing.gain_must_match() {
+        match (expected.info.iso, found.info.iso) {
+            (Some(a), Some(b)) if (a - b).abs() > f64::EPSILON => {
+                findings.push(Mismatch::Gain { expected: a, found: b });
+            }
+            (Some(_), Some(_)) => {}
+            // Two absences are not agreement here either, and this is the
+            // branch that matters: a flat whose gain went unrecorded would
+            // otherwise be reported as an exact match.
+            _ => findings.push(Mismatch::Unrecorded { property: Property::Gain }),
+        }
     }
 
     findings.extend(temperature(expected, found, tolerances));
@@ -601,12 +627,18 @@ fn optical_train(expected: &FrameRecord, found: &FrameRecord) -> Vec<Mismatch> {
     compare(Property::FocalLength, expected.info.focal_length_mm, found.info.focal_length_mm);
     compare(Property::Aperture, expected.info.aperture, found.info.aperture);
 
-    if expected.info.lens_model != found.info.lens_model {
-        findings.push(Mismatch::OpticalTrain {
-            property: Property::LensModel,
-            expected: None,
-            found: None,
-        });
+    // `lens_model` is a `String` and an absent lens is the empty one — a
+    // telescope, which is the target use case. Comparing the strings directly
+    // would call an unrecorded lens a difference on one side and a match on the
+    // other, so emptiness is tested first.
+    match (expected.info.lens_model.trim(), found.info.lens_model.trim()) {
+        ("", _) | (_, "") => {
+            findings.push(Mismatch::Unrecorded { property: Property::LensModel });
+        }
+        (a, b) if a != b => {
+            findings.push(Mismatch::LensModel { expected: a.to_owned(), found: b.to_owned() });
+        }
+        _ => {}
     }
     findings
 }
@@ -664,10 +696,11 @@ mod tests {
     }
 
     #[test]
-    fn mixed_iso_lights_share_a_stack() {
+    fn mixed_iso_lights_are_never_refused_for_one_another() {
         // The companion to the rule above: normalisation removes analogue gain,
-        // so within one integration ISO is a reporting concern, not a stacking
-        // one.
+        // so ISO is a reporting concern here, not a refusal. Note what this does
+        // and does not say — the two frames still land in separate sets, because
+        // a set is what a master dark is matched to. See `PartitionKey::gain`.
         let a = testing::record("a.cr3", light());
         let b = testing::record("b.cr3", testing::info(300.0, 800.0));
 
@@ -815,6 +848,56 @@ mod tests {
         // Absent or nonsensical values are never "the same".
         assert!(!same_exposure(0.0, 0.0, &tolerances));
         assert!(!same_exposure(f64::NAN, 300.0, &tolerances));
+    }
+
+    #[test]
+    fn a_flat_whose_gain_was_not_recorded_is_not_reported_as_matching() {
+        // The soft gain path used to short-circuit on a missing value and push
+        // nothing at all, so a flat with no ISO read as an exact match.
+        let lights = testing::record("light.cr3", light());
+        let mut flats = testing::record("flat.cr3", flat());
+        flats.info.iso = None;
+
+        let findings = differences(&lights, &flats, Pairing::FlatToLight, &Tolerances::default());
+        assert!(
+            findings.contains(&Mismatch::Unrecorded { property: Property::Gain }),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn two_different_lenses_are_named_rather_than_called_unrecorded() {
+        let mut lights = testing::record("light.cr3", light());
+        let mut flats = testing::record("flat.cr3", flat());
+        lights.info.lens_model = "RF135mm F1.8 L IS USM".to_owned();
+        flats.info.lens_model = "RF24-105mm F4 L IS USM".to_owned();
+
+        let findings = differences(&lights, &flats, Pairing::FlatToLight, &Tolerances::default());
+        let named = findings.iter().find(|m| matches!(m, Mismatch::LensModel { .. }));
+        let Some(Mismatch::LensModel { expected, found }) = named else {
+            panic!("expected both lenses to be named, got {findings:?}");
+        };
+        assert_eq!(expected, "RF135mm F1.8 L IS USM");
+        assert_eq!(found, "RF24-105mm F4 L IS USM");
+        // And it is loud: a changed lens is the strongest evidence a flat does
+        // not belong to these lights.
+        assert_eq!(named.unwrap().severity(), Severity::Warning);
+    }
+
+    #[test]
+    fn an_absent_lens_reads_as_unrecorded_on_either_side() {
+        // Through a telescope both are empty; with a lens on one side only, the
+        // strings differ but nothing was actually compared.
+        let mut lights = testing::record("light.cr3", light());
+        let flats = testing::record("flat.cr3", flat());
+        lights.info.lens_model = "RF135mm F1.8 L IS USM".to_owned();
+
+        let findings = differences(&lights, &flats, Pairing::FlatToLight, &Tolerances::default());
+        assert!(
+            findings.contains(&Mismatch::Unrecorded { property: Property::LensModel }),
+            "{findings:?}"
+        );
+        assert!(!findings.iter().any(|m| matches!(m, Mismatch::LensModel { .. })));
     }
 
     #[test]
