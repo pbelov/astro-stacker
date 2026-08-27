@@ -169,6 +169,78 @@ pub fn measure(samples: &Samples, layout: &ImageLayout) -> Option<FrameStats> {
     Some(FrameStats { colours, uniformity: uniformity(&blocks, black) })
 }
 
+/// A finer illumination map, normalised to its own mean.
+///
+/// Deliberately not part of [`FrameStats`]: a session holds hundreds of those
+/// and they have to stay tiny, while this is `grid * grid` floats and exists to
+/// answer a question about one or two frames. Normalised to the mean rather
+/// than to the centre so that two maps can be subtracted — comparing a flat
+/// against another flat is how you find out whether anything in the optical
+/// train moved between them.
+///
+/// Uses the dominant colour only, and signal above the black level. `None` when
+/// the frame cannot be described, or recorded no black level.
+pub fn illumination_map(samples: &Samples, layout: &ImageLayout, grid: usize) -> Option<Vec<f32>> {
+    let Samples::U16(values) = samples else {
+        return None;
+    };
+    if grid == 0 {
+        return None;
+    }
+    let area = active_area(layout, values.len())?;
+    let cfa = CfaGrid::new(layout)?;
+    let black = cfa.black_level(layout, cfa.dominant);
+    if !black.is_finite() {
+        return None;
+    }
+
+    // Sum and count rather than a histogram per cell: at a fine grid the
+    // histograms would dominate the memory, and a flat has no outliers worth
+    // being robust against beyond the hot photosites, which a mean over tens of
+    // thousands of samples absorbs.
+    let cells = grid.checked_mul(grid)?;
+    let mut totals = vec![0f64; cells];
+    let mut counts = vec![0u64; cells];
+
+    for y in area.y..area.y + area.height {
+        let row = y * layout.width as usize;
+        let cell_row = (y - area.y) * grid / area.height;
+        let cfa_row = (y % cfa.height) * cfa.width;
+        let mut cfa_col = area.x % cfa.width;
+
+        for x in area.x..area.x + area.width {
+            if cfa.pattern[cfa_row + cfa_col] as usize == cfa.dominant {
+                let cell = cell_row * grid + ((x - area.x) * grid / area.width).min(grid - 1);
+                totals[cell] += f64::from(values[row + x]);
+                counts[cell] += 1;
+            }
+            cfa_col += 1;
+            if cfa_col == cfa.width {
+                cfa_col = 0;
+            }
+        }
+    }
+
+    let mut map: Vec<f32> = totals
+        .iter()
+        .zip(&counts)
+        .map(|(total, count)| {
+            if *count == 0 { f32::NAN } else { (total / *count as f64) as f32 - black }
+        })
+        .collect();
+
+    let finite: Vec<f32> = map.iter().copied().filter(|value| value.is_finite()).collect();
+    let mean = finite.iter().sum::<f32>() / finite.len().max(1) as f32;
+    // NaN included: a mean that is not a positive number cannot normalise anything.
+    if !mean.is_finite() || mean <= 0.0 {
+        return None;
+    }
+    for value in &mut map {
+        *value /= mean;
+    }
+    Some(map)
+}
+
 // ---------------------------------------------------------------------------
 
 struct Area {
@@ -500,6 +572,21 @@ mod tests {
         let stats = measure(&samples, &layout).unwrap();
         assert!(stats.uniformity.blocks.iter().all(|value| value.is_nan()));
         assert!(stats.uniformity.ramp().is_nan());
+    }
+
+    #[test]
+    fn a_fine_map_is_normalised_so_two_can_be_subtracted() {
+        let (samples, layout) = frame(96, 96, 5000, 5000, 5000);
+        let map = illumination_map(&samples, &layout, 8).expect("a describable frame");
+        assert_eq!(map.len(), 64);
+        // An even frame is 1.0 everywhere, whatever its absolute level, which is
+        // what makes two maps comparable.
+        assert!(map.iter().all(|value| (value - 1.0).abs() < 0.01), "{map:?}");
+
+        let (brighter, layout) = frame(96, 96, 9000, 9000, 9000);
+        let other = illumination_map(&brighter, &layout, 8).unwrap();
+        let worst = map.iter().zip(&other).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 0.01, "two even frames must subtract to nothing, worst {worst}");
     }
 
     #[test]

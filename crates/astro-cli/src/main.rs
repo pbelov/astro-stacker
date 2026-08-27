@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use astro_core::session::{ColourStats, FrameStats, measure};
+use astro_core::session::{ColourStats, FrameStats, illumination_map, measure};
 use astro_core::{OpenFrame, PluginHost, Samples, cfa_pattern_name, default_plugin_dirs};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
 use scan_command::ScanArgs;
@@ -48,6 +48,11 @@ enum Command {
         /// Raw files to measure.
         #[arg(required = true, value_name = "FILE")]
         files: Vec<PathBuf>,
+
+        /// Also print an N by N illumination map, normalised to its own mean so
+        /// that two frames can be compared cell by cell.
+        #[arg(long, value_name = "N")]
+        map: Option<usize>,
     },
 
     /// Describe frames: sensor layout, calibration levels, shooting parameters.
@@ -86,7 +91,7 @@ fn main() -> Result<()> {
             let scan = matches.subcommand_matches("scan").expect("the scan subcommand was matched");
             scan_command::run(&host, args, scan)
         }
-        Command::Measure { files } => measure_frames(&host, files),
+        Command::Measure { files, map } => measure_frames(&host, files, *map),
         Command::Info { files, decode } => describe_frames(&host, files, *decode),
     }
 }
@@ -138,7 +143,7 @@ fn list_plugins(host: &PluginHost) -> Result<()> {
 /// against real frames before they are worth encoding. The measurements do not:
 /// whole-frame minimum and maximum turned out to be useless on real data,
 /// because hot and cold photosites pin both ends of every frame alike.
-fn measure_frames(host: &PluginHost, files: &[PathBuf]) -> Result<()> {
+fn measure_frames(host: &PluginHost, files: &[PathBuf], map: Option<usize>) -> Result<()> {
     let mut failures = 0;
 
     for (index, file) in files.iter().enumerate() {
@@ -146,7 +151,7 @@ fn measure_frames(host: &PluginHost, files: &[PathBuf]) -> Result<()> {
             println!();
         }
         println!("{}", file.display());
-        match measure_frame(host, file) {
+        match measure_frame(host, file, map) {
             Ok(()) => {}
             Err(error) => {
                 failures += 1;
@@ -161,13 +166,35 @@ fn measure_frames(host: &PluginHost, files: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn measure_frame(host: &PluginHost, file: &Path) -> Result<()> {
+fn measure_frame(host: &PluginHost, file: &Path, map: Option<usize>) -> Result<()> {
     let frame = host.open(file).with_context(|| format!("opening {}", file.display()))?;
     let samples = frame.decode().with_context(|| format!("decoding {}", file.display()))?;
     let Some(stats) = measure(&samples, frame.layout()) else {
         bail!("this frame is not a single-component mosaic, so it cannot be measured per colour");
     };
     print_stats(&stats);
+
+    if let Some(grid) = map {
+        match illumination_map(&samples, frame.layout(), grid) {
+            Some(cells) => {
+                println!("  map {grid}x{grid}, normalised to its own mean");
+                for row in cells.chunks(grid) {
+                    let line: Vec<String> = row
+                        .iter()
+                        .map(|value| {
+                            if value.is_finite() {
+                                format!("{value:.3}")
+                            } else {
+                                "  -  ".to_owned()
+                            }
+                        })
+                        .collect();
+                    println!("    {}", line.join(" "));
+                }
+            }
+            None => println!("  map        not available without a black level"),
+        }
+    }
     Ok(())
 }
 

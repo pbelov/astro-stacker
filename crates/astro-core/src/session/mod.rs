@@ -26,7 +26,7 @@ pub use compat::{
 };
 pub use kind::{Basis, FrameKind, FrameRole, Inference};
 pub use scan::{Progress, RoleRule, ScanOptions, ScanReport, scan, scan_with_progress};
-pub use stats::{ColourStats, FrameStats, Uniformity, measure};
+pub use stats::{ColourStats, FrameStats, Uniformity, illumination_map, measure};
 pub use sets::{
     BlockedRole, CalibrationMatch, ExposureBucket, ExposureSpan, FrameSet, GainBucket, MatchQuality,
     Partition, PartitionKey, SetId, SetKey, Split, StackPlan, Suspicion, best_match,
