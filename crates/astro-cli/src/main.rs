@@ -218,6 +218,17 @@ fn print_frame(frame: &OpenFrame) {
         None => println!("  cfa        none (not mosaiced)"),
     }
 
+    // Display metadata, not storage: the sample buffer is always in sensor
+    // readout order. Shown because a frame whose flag differs from its
+    // neighbours was shot with the camera held another way round.
+    println!(
+        "  orientation {}",
+        match layout.orientation {
+            0 => "not recorded".to_owned(),
+            n => n.to_string(),
+        }
+    );
+
     // Worth showing even when it equals the full frame: an unexpectedly small
     // active area is the first sign a frame was shot in a crop mode.
     println!(
