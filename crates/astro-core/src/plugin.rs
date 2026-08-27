@@ -215,6 +215,22 @@ impl PluginHost {
         self.plugins.is_empty()
     }
 
+    /// Every extension any loaded plugin claims, lowercase and without a dot.
+    ///
+    /// Used only to narrow a directory walk before anything is opened. `probe`
+    /// remains the authority on what a file is, so a file the user names
+    /// directly is still opened whatever it is called.
+    pub fn supported_extensions(&self) -> Vec<String> {
+        let mut extensions: Vec<String> = self
+            .plugins
+            .iter()
+            .flat_map(|plugin| plugin.description().extensions.iter().cloned())
+            .collect();
+        extensions.sort();
+        extensions.dedup();
+        extensions
+    }
+
     /// Loads one library, rejecting a second plugin that claims an id already taken.
     pub fn load_file(&mut self, path: &Path) -> Result<Arc<LoadedPlugin>> {
         let plugin = Arc::new(LoadedPlugin::load(path)?);

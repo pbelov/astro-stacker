@@ -5,17 +5,20 @@
 //! pixels actually decode.
 
 mod format;
+mod report;
+mod scan_command;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use astro_core::{OpenFrame, PluginHost, Samples, cfa_pattern_name, default_plugin_dirs};
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
+use scan_command::ScanArgs;
 
 #[derive(Parser)]
 #[command(name = "astro-stacker", version, about = "Stacking for deep-sky astrophotography")]
-struct Cli {
+pub(crate) struct Cli {
     /// Load plugins from this directory as well. May be repeated.
     #[arg(long = "plugin-dir", global = true, value_name = "DIR")]
     plugin_dirs: Vec<PathBuf>,
@@ -33,6 +36,10 @@ enum Command {
     /// List the format plugins that loaded, and what they read.
     Plugins,
 
+    /// Read a session: group frames into stackable sets, match calibration to
+    /// them, and say what does not fit.
+    Scan(ScanArgs),
+
     /// Describe frames: sensor layout, calibration levels, shooting parameters.
     Info {
         /// Raw files to describe.
@@ -47,7 +54,11 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Parsed through `ArgMatches` rather than `Cli::parse` because `scan` needs
+    // the order the options were typed in: `--group` applies to the paths that
+    // follow it, and the parsed struct does not preserve that.
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
 
     let level = match cli.verbose {
         0 => "warn",
@@ -59,9 +70,13 @@ fn main() -> Result<()> {
 
     let host = load_plugins(&cli.plugin_dirs)?;
 
-    match cli.command {
+    match &cli.command {
         Command::Plugins => list_plugins(&host),
-        Command::Info { files, decode } => describe_frames(&host, &files, decode),
+        Command::Scan(args) => {
+            let scan = matches.subcommand_matches("scan").expect("the scan subcommand was matched");
+            scan_command::run(&host, args, scan)
+        }
+        Command::Info { files, decode } => describe_frames(&host, files, *decode),
     }
 }
 

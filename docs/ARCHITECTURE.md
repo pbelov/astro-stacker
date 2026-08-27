@@ -61,11 +61,101 @@ UTC. That is not the true instant, but every frame in a session is off by the
 same constant, so ordering and the intervals between frames — all stacking
 actually needs — are exact.
 
+### Evidence may propose and may veto, but may never elect
+
+A frame's kind is assigned by the user. Folder names, file names and shooting
+parameters are read as evidence and shown as proposals; nothing is ever assigned
+from them, and there is no confidence score anywhere in the model.
+
+This is an asymmetry, not a preference. A light, a flat and a bias each have a
+positive signature. A dark has only a negative one — no sky, no stars, no
+gradient — and those absences are equally consistent with a light shot under
+thick cloud. A classifier that must label every frame is forced to guess exactly
+where a wrong guess does the most damage, and the damage is silent: a light
+filed as a dark subtracts a star field from every frame in the stack, a light
+filed as a flat divides every frame by a picture of the sky, and neither throws.
+
+Nor is this a gap the ABI could close. A correctly shot dark has the *same*
+exposure, ISO and body as its lights — that is what makes it valid — so those
+are precisely the fields that cannot separate them. FITS capture software writes
+an `IMAGETYP` keyword; CR2 and CR3 have no equivalent.
+
+### Two types for incompatibility, not two severities
+
+`Incompatibility` is a refusal; `Mismatch` is a report. They are separate types
+rather than one type with a severity field, so that a caller cannot accidentally
+treat a refusal as advisory or promote a report into a refusal.
+
+The line is drawn where the arithmetic stops being **defined**, not where it
+stops being ideal. Dimensions, component count, sample format, bit depth, mosaic
+phase and active area decide which photosite `samples[i]` is; if two frames
+disagree about that, no later correction recovers them. Everything else —
+exposure, gain, temperature, black point, orientation — changes the magnitude of
+a signal that is still spatially aligned. A stacker that refuses a 295-second
+dark on a 300-second light because a threshold said so is worse than one that
+uses it and says what it did.
+
+The two exceptions are deliberate and both are about gain: a dark or a bias at
+the wrong ISO is a hard refusal, because gain scales read noise and the
+fixed-pattern amplitude together, there is no benign reason for the mismatch,
+and the result is a faintly wrong background nobody traces back to the
+calibration frames. Within a light set, by contrast, mixed ISO is fine —
+normalisation removes a linear scale factor, and DeepSkyStacker stacks mixed-ISO
+lights into one image too.
+
+### A rule that could not run is a third state
+
+`Mismatch::Unrecorded` and `Incompatibility::Unrecorded` exist because two
+absences are not agreement. On the hardware this project targets, sensor
+temperature is *never* recorded — rawler does not surface Canon's makernote
+value — so a report that said "temperatures match" would be a lie the user acts
+on, on every single frame. A silent pass and a rule that never fired must not
+look the same.
+
+### Frames are named by a dense id, not by a path
+
+`Session` is an append-only arena and a frame is a `FrameId` into it. Excluding
+a frame leaves its id in place. Registration will want one transform per frame,
+star extraction a list of stars per frame, and integration a weight per frame;
+all three arrive as side tables indexed by the same integer, so none of them
+reshapes `FrameRecord`, and none of them leaves a megabyte of star positions
+resident while the user is only looking at a list of sets.
+
+`SetId`, by contrast, is a **within-partition handle only**. Partitioning is
+pure and reallocates ids from zero, so excluding one frame can renumber every
+set. Anything that outlives one partition — a cached master frame — must travel
+by `SetKey`, which is `Hash + Eq`. `Partition::set_by_key` is the rebinding path.
+
+### Exposure cannot key a hash map
+
+Sets are built in two passes. The first hashes on `PartitionKey`, every field of
+which is exact. The second sorts each bucket by exposure and cuts it into runs.
+A tolerance is not an equivalence relation — 100, 104 and 108 seconds are each
+within five per cent of a neighbour while the ends are not within five per cent
+of each other — so it cannot be part of a hash key. Sorting first is what makes
+the answer independent of the order files were scanned in; extending a run only
+while the whole run's span stays inside the tolerance of its longest member is
+what stops a night of sixty-second subs chaining into a night of six-hundred
+second ones.
+
+### `read_samples` returns sensor readout order
+
+A plugin must never permute the buffer to honour `ImageLayout::orientation`.
+That field is metadata about how an image should be shown, not about how it is
+stored. The host indexes frames against each other photosite by photosite, so
+two frames of one sensor must always agree on what `samples[i]` is, whichever
+way the camera was pointing. Orientation is therefore a note on a flat, never a
+reason to refuse a frame.
+
 ## Layout
 
 ```
 crates/astro-plugin-abi   the contract; depends on nothing
-crates/astro-core         plugin host and frame model
+crates/astro-core         plugin host, frame model, and the session:
+    session/kind.rs         what a frame is, and what the evidence suggests
+    session/compat.rs       whether two frames may be indexed against each other
+    session/sets.rs         partitioning, and matching calibration to lights
+    session/scan.rs         walking paths into a session
 crates/astro-cli          the astro-stacker binary
 plugins/astro-format-canon  CR2/CR3, via rawler
 ```
@@ -94,6 +184,29 @@ host, and is expected to check magic numbers rather than trust the extension.
 
 ## What is deliberately not built yet
 
-Frame classification (light/dark/flat/bias), calibration, star detection,
-registration, stacking, quality analysis, and the Tauri user interface. The
-frame model will grow to meet them; the ABI should not have to.
+**Pixel statistics.** A `--measure` pass was designed and left out. Decoding 500
+frames of 45 megapixels is roughly two minutes and 22 GB of reads, and the
+histogram signatures that would veto a misfiled frame have not been run against
+a real CR2 or CR3. Shipping an unverified decode path would break this project's
+own rule about claiming things work. It is the first thing to add, and the hook
+for it is `Suspicion`, which already carries findings a decode would raise.
+
+**Session persistence.** The save-and-reload format belongs in a future
+`astro-project` crate, on the line: astro-core models what was shot,
+astro-project models what the user is doing about it. `FrameId` and
+`FrameFingerprint` are already shaped for it — the fingerprint hashes with
+FNV-1a rather than the standard library's hasher precisely because it has to
+mean the same thing next year.
+
+**Camera serial numbers.** A dark library is body-specific: the hot-pixel map
+belongs to the individual sensor, so matching on make and model alone will
+silently accept another body's darks. rawler parses the tag and the ABI does not
+carry it. Breaking a frozen contract to add a field, in a milestone that does
+not yet calibrate anything, is the wrong trade — so `BodyKey` carries
+`serial: Option<String>` set to `None`, and the day the ABI is opened for a
+reason that forces it, the change is one line in `BodyKey::from_info` and
+nothing that consumes a `BodyKey` moves.
+
+**Everything downstream.** Calibration and master generation, star detection,
+FWHM and trailing analysis, registration, stacking, and the Tauri user
+interface. The session model will grow to meet them; the ABI should not have to.

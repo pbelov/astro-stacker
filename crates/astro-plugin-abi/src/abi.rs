@@ -179,8 +179,13 @@ pub const CFA_MAX_CELLS: usize = CFA_MAX_DIM * CFA_MAX_DIM;
 ///
 /// The host zeroes this and sets `struct_size` before calling; the plugin
 /// rejects a `struct_size` it does not recognise.
+///
+/// Deliberately not `PartialEq`: several fields are NaN when the camera did not
+/// record them, and NaN compares unequal to itself, so a derived comparison
+/// would report two copies of one layout as different. Compare the fields that
+/// matter — the host does this in `GeometryKey`.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct ImageLayout {
     pub struct_size: u32,
 
@@ -404,6 +409,13 @@ pub struct PluginVTable {
     /// Decodes the frame into a host-allocated buffer of exactly
     /// [`ImageLayout::required_bytes`]. Samples are row-major, top-left origin,
     /// components interleaved, native endianness.
+    ///
+    /// Samples are in **sensor readout order**. A plugin must never permute the
+    /// buffer to honour [`ImageLayout::orientation`] — that field is metadata
+    /// about how the image should be shown, not about how it is stored. The
+    /// distinction is load-bearing: the host indexes frames against each other
+    /// photosite by photosite, so two frames of one sensor must always agree on
+    /// what `samples[i]` is, whichever way the camera was pointing.
     pub read_samples: unsafe extern "C" fn(handle: *mut FrameHandle, dst: *mut u8, dst_len: usize) -> Status,
 
     /// Human-readable detail for the last failed call on `handle`.

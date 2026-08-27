@@ -17,7 +17,7 @@ use astro_plugin_abi::abi::{
 use astro_plugin_abi::export::FormatPlugin;
 use astro_plugin_abi::safe::{FrameInfo, PluginDescription, PluginError, samples_u16_mut};
 use rawler::cfa::CFAColor;
-use rawler::decoders::{Decoder, Orientation, RawDecodeParams, RawMetadata};
+use rawler::decoders::{Decoder, RawDecodeParams, RawMetadata};
 use rawler::formats::tiff::Rational;
 use rawler::rawimage::RawPhotometricInterpretation;
 use rawler::rawsource::RawSource;
@@ -55,17 +55,21 @@ impl FormatPlugin for CanonRaw {
         let decoder = rawler::get_decoder(&source)
             .map_err(|err| PluginError::unsupported(err.to_string()))?;
 
+        // Metadata first: the orientation in the layout has to come from EXIF,
+        // because rawler does not carry it on the decoded image (see
+        // `exif_orientation`).
+        let metadata = decoder
+            .raw_metadata(&source, &RawDecodeParams::default())
+            .map_err(|err| PluginError::parse(err.to_string()))?;
+
         // `dummy` builds the full description — dimensions, CFA, levels — while
         // skipping the expensive pixel decompression. Opening a frame stays
         // cheap, which matters when a session holds hundreds of them.
         let described = decoder
             .raw_image(&source, &RawDecodeParams::default(), true)
             .map_err(|err| PluginError::parse(err.to_string()))?;
-        let layout = layout_from(&described)?;
 
-        let metadata = decoder
-            .raw_metadata(&source, &RawDecodeParams::default())
-            .map_err(|err| PluginError::parse(err.to_string()))?;
+        let layout = layout_from(&described, &metadata)?;
         let info = info_from(&metadata);
 
         Ok(Self { source, decoder: Mutex::new(decoder), layout, info })
@@ -115,7 +119,7 @@ astro_plugin_abi::export_plugin!(CanonRaw);
 // rawler -> ABI
 // ---------------------------------------------------------------------------
 
-fn layout_from(raw: &RawImage) -> Result<ImageLayout, PluginError> {
+fn layout_from(raw: &RawImage, metadata: &RawMetadata) -> Result<ImageLayout, PluginError> {
     if !matches!(raw.data, RawImageData::Integer(_)) {
         return Err(PluginError::unsupported(
             "this plugin only reads integer sensor data; no Canon format produces floating-point raw",
@@ -128,7 +132,7 @@ fn layout_from(raw: &RawImage) -> Result<ImageLayout, PluginError> {
         components: raw.cpp as u32,
         bits_per_sample: raw.bps as u32,
         sample_format: SampleFormat::U16,
-        orientation: orientation_number(raw.orientation),
+        orientation: exif_orientation(metadata),
         white_level: raw.whitelevel.as_bayer_array(),
         wb_coeffs: raw.wb_coeffs,
         ..Default::default()
@@ -233,17 +237,20 @@ fn copy_active_area(raw: &RawImage, layout: &mut ImageLayout) {
     layout.active_height = area.d.h as u32;
 }
 
-fn orientation_number(orientation: Orientation) -> u32 {
-    match orientation {
-        Orientation::Normal => 1,
-        Orientation::HorizontalFlip => 2,
-        Orientation::Rotate180 => 3,
-        Orientation::VerticalFlip => 4,
-        Orientation::Transpose => 5,
-        Orientation::Rotate90 => 6,
-        Orientation::Transverse => 7,
-        Orientation::Rotate270 => 8,
-        Orientation::Unknown => 0,
+/// Reads orientation from EXIF rather than from the decoded image.
+///
+/// `RawImage::orientation` looks like the obvious source and is not one:
+/// rawler 0.7.2 hardcodes it to `Orientation::Normal` in both constructors
+/// (`src/rawimage.rs:389` and `:478`, each marked `// TODO fixme`), so reading
+/// it would report every frame as upright whichever way the camera pointed —
+/// a fabricated value, which this project treats as worse than none.
+///
+/// Returns 0 for absent or out-of-range, per the ABI. Note that rawler never
+/// permutes the sample buffer either way, so this is display metadata only.
+fn exif_orientation(metadata: &RawMetadata) -> u32 {
+    match metadata.exif.orientation {
+        Some(value @ 1..=8) => u32::from(value),
+        _ => 0,
     }
 }
 
@@ -258,10 +265,10 @@ fn info_from(metadata: &RawMetadata) -> FrameInfo {
             .map(|lens| lens.lens_name.clone())
             .or_else(|| exif.lens_model.clone())
             .unwrap_or_default(),
-        exposure_seconds: exif.exposure_time.map(rational),
+        exposure_seconds: exif.exposure_time.and_then(positive_rational),
         iso: iso_speed(exif.iso_speed_ratings, exif.iso_speed),
-        aperture: exif.fnumber.map(rational),
-        focal_length_mm: exif.focal_length.map(rational),
+        aperture: exif.fnumber.and_then(positive_rational),
+        focal_length_mm: exif.focal_length.and_then(positive_rational),
         capture_time_unix: exif
             .date_time_original
             .as_deref()
@@ -285,11 +292,19 @@ fn iso_speed(ratings: Option<u16>, extended: Option<u32>) -> Option<f64> {
     }
 }
 
-fn rational(value: Rational) -> f64 {
-    if value.d == 0 {
-        return f64::NAN;
+/// Reads a rational that is only meaningful when positive.
+///
+/// Exposure time, aperture and focal length are each strictly positive on a
+/// frame that recorded them. A body with no electronic lens — every telescope —
+/// writes `0/1` for aperture and focal length, and returning `Some(0.0)` there
+/// would let two telescope frames compare equal at "f/0, 0 mm" and report a
+/// matching optical train having compared nothing.
+fn positive_rational(value: Rational) -> Option<f64> {
+    if value.d == 0 || value.n == 0 {
+        return None;
     }
-    value.n as f64 / value.d as f64
+    let value = value.n as f64 / value.d as f64;
+    value.is_finite().then_some(value)
 }
 
 #[cfg(test)]
@@ -307,15 +322,10 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_denominator_does_not_divide() {
-        assert_eq!(rational(Rational { n: 1, d: 4 }), 0.25);
-        assert!(rational(Rational { n: 1, d: 0 }).is_nan());
-    }
-
-    #[test]
-    fn orientation_maps_to_exif_numbering() {
-        assert_eq!(orientation_number(Orientation::Normal), 1);
-        assert_eq!(orientation_number(Orientation::Rotate270), 8);
-        assert_eq!(orientation_number(Orientation::Unknown), 0);
+    fn a_lens_less_body_reports_no_aperture_rather_than_f_zero() {
+        assert_eq!(positive_rational(Rational { n: 1, d: 4 }), Some(0.25));
+        // What a telescope writes: the tag is present and says nothing.
+        assert_eq!(positive_rational(Rational { n: 0, d: 1 }), None);
+        assert_eq!(positive_rational(Rational { n: 1, d: 0 }), None);
     }
 }

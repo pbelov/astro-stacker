@@ -5,16 +5,16 @@ frames into one deep image. In the spirit of DeepSkyStacker, but faster, and
 built so that every image format is a plugin rather than a branch in a switch
 statement.
 
-**Status: 0.0.1 — foundation.** The plugin boundary works end to end, and
-Canon CR2/CR3 frames can be described and decoded through it. There is no
-stacking yet.
+**Status: 0.1.0 — it reads a session.** Point it at a night's folder and it
+groups the frames into stackable sets, matches darks, flats and biases to the
+lights, and names everything that does not fit. It does not stack anything yet.
 
 ## What is here
 
 | Crate | Role |
 |---|---|
 | [`astro-plugin-abi`](crates/astro-plugin-abi) | The frozen C ABI between host and plugins, plus a safe wrapper for writing them |
-| [`astro-core`](crates/astro-core) | Plugin discovery, loading, and reading frames |
+| [`astro-core`](crates/astro-core) | Plugin discovery, frame reading, and the session model: classification, grouping and compatibility |
 | [`astro-cli`](crates/astro-cli) | `astro-stacker` command line binary |
 | [`astro-format-canon`](plugins/astro-format-canon) | Canon CR2/CR3 reader, built on [rawler](https://crates.io/crates/rawler) |
 
@@ -34,11 +34,39 @@ List the format plugins that loaded:
 cargo run --bin astro-stacker -- plugins
 ```
 
-Describe a frame, and decode it to confirm the pixels really read:
+Describe one frame, and decode it to confirm the pixels really read:
 
 ```bash
 cargo run --release --bin astro-stacker -- info --decode path/to/IMG_0001.CR3
 ```
+
+Read a whole session:
+
+```bash
+cargo run --release --bin astro-stacker -- scan --lights D:/astro/M31/lights --darks D:/astro/M31/darks --flats D:/astro/M31/flats --biases D:/astro/library/bias
+```
+
+`--group` puts the paths that follow it into a named group, for a per-night
+layout. Calibration named before any `--group` serves every group, which is how
+a bias library shot once a year gets reused:
+
+```bash
+cargo run --release --bin astro-stacker -- scan --biases D:/astro/library/bias --group mon --lights D:/astro/mon/lights --darks D:/astro/mon/darks --group tue --lights D:/astro/tue/lights
+```
+
+## What it will and will not decide for you
+
+A frame's kind comes from you, never from a guess. Folder and file names are
+read as *evidence* and shown as proposals, but nothing is ever assigned from
+them. The reason is asymmetry: a light, a flat and a bias each have a positive
+signature, while a dark has only a negative one — no sky, no stars — which a
+light shot under thick cloud shares. A classifier forced to label every frame
+guesses exactly where a wrong guess does the most damage, and the damage is
+silent. A light filed as a flat divides every frame in the stack by a picture of
+the sky, and nothing throws.
+
+What it *will* decide: which frames can be indexed against each other at all,
+which calibration set fits best, and what about that fit is worth telling you.
 
 ## Design in one paragraph
 

@@ -10,5 +10,6 @@ authors.workspace = true
 [dependencies]
 astro-plugin-abi.workspace = true
 libloading.workspace = true
+rayon.workspace = true
 log.workspace = true
 thiserror.workspace = true

@@ -9,6 +9,7 @@
 pub mod error;
 pub mod frame;
 pub mod plugin;
+pub mod session;
 
 pub use error::{Error, Result};
 pub use frame::Samples;
@@ -18,3 +19,5 @@ pub use plugin::{LoadReport, LoadedPlugin, OpenFrame, PluginHost, default_plugin
 /// read a frame's description.
 pub use astro_plugin_abi::abi::ImageLayout;
 pub use astro_plugin_abi::safe::{FrameInfo, PluginDescription, cfa_pattern_name};
+
+pub use session::{FrameKind, FrameRecord, Partition, ScanOptions, ScanReport, Session, Tolerances, scan};
