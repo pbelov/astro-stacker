@@ -270,6 +270,15 @@ pub enum Suspicion {
     /// second closed-shutter exposure of equal length and subtracts it. Such a
     /// light has already had its dark removed, so a master dark over-subtracts.
     ProbableInCameraDarkSubtraction { set: SetId, interval_seconds: f64, exposure_seconds: f64 },
+    /// A set holding so few frames of its kind, beside so many, that it cannot
+    /// be a series anybody meant to integrate.
+    ///
+    /// The finding is the arithmetic and nothing more. Why those frames exist -
+    /// framing, focus, a cloud, a deliberate short series for bright stars - is
+    /// a fact about the evening that no file records, and guessing at it in the
+    /// message would be a confident claim about something the tool cannot see.
+    /// Reported and never acted on, for the same reason.
+    MinorityOfKind { set: SetId, members: usize, dominant: SetId, dominant_members: usize },
     /// A calibration set whose own frames were shot across more than one night.
     ///
     /// Flats especially. A flat records the optical train at one moment;
@@ -661,6 +670,19 @@ const FLAT_NEEDS_DARK_FLATS_SECONDS: f64 = 1.0;
 /// 1/8000 s bias from a 1/250 s flat filed in the wrong folder.
 const BIAS_EXPOSURE_RATIO: f64 = 4.0;
 
+/// A set is a minority when the largest set of its kind holds at least this
+/// many times as many frames.
+const MINORITY_RATIO: usize = 10;
+
+/// ...and holds fewer than this many frames itself.
+///
+/// Both conditions, because either alone is wrong. A ratio alone would flag a
+/// deliberate 20-frame series beside 226. A count alone would flag the whole of
+/// a short session. Together they describe the only case that is unambiguous:
+/// too few frames to reject an outlier from, let alone to integrate, sitting
+/// beside a series ten times deeper.
+const MINORITY_CEILING: usize = 6;
+
 /// Below this exposure, the in-camera dark subtraction test is not run.
 ///
 /// The test is a ratio, and at short exposures ordinary overhead reaches it: a
@@ -716,6 +738,25 @@ fn find_suspicions(
     for set in partition.sets_of(FrameKind::Light) {
         if let Some(found) = in_camera_dark_subtraction(session, set) {
             suspicions.push(found);
+        }
+    }
+
+    for kind in FrameKind::ALL {
+        let mut of_kind: Vec<&FrameSet> = partition.sets_of(kind).collect();
+        if of_kind.len() < 2 {
+            continue;
+        }
+        of_kind.sort_by_key(|set| std::cmp::Reverse(set.len()));
+        let dominant = of_kind[0];
+        for other in &of_kind[1..] {
+            if other.len() < MINORITY_CEILING && other.len() * MINORITY_RATIO <= dominant.len() {
+                suspicions.push(Suspicion::MinorityOfKind {
+                    set: other.id,
+                    members: other.len(),
+                    dominant: dominant.id,
+                    dominant_members: dominant.len(),
+                });
+            }
         }
     }
 
@@ -1010,6 +1051,60 @@ mod tests {
         assert!(monday_plan.dark.is_some());
         assert!(tuesday_plan.dark.is_none(), "Monday's darks do not reach Tuesday");
         assert!(tuesday_plan.blocked.is_empty(), "and are not reported as refused either");
+    }
+
+    #[test]
+    fn a_handful_of_frames_beside_a_deep_series_is_named() {
+        // The four framing and focus tests at the start of a real night, which
+        // the tool used to present as peers of the 226-frame series.
+        let mut session = Session::new();
+        testing::run(&mut session, FrameKind::Light, "main", 226, light());
+        testing::run(&mut session, FrameKind::Light, "test", 2, info(1.0, 6400.0));
+
+        let partition = partitioned(&session);
+        let minorities: Vec<&Suspicion> = partition
+            .suspicions
+            .iter()
+            .filter(|s| matches!(s, Suspicion::MinorityOfKind { .. }))
+            .collect();
+        assert_eq!(minorities.len(), 1, "{:?}", partition.suspicions);
+        let Suspicion::MinorityOfKind { members, dominant_members, .. } = minorities[0] else {
+            unreachable!()
+        };
+        assert_eq!((*members, *dominant_members), (2, 226));
+    }
+
+    #[test]
+    fn a_deliberate_short_series_is_not_called_a_minority() {
+        // Twenty frames shot on purpose for the bright stars, beside 226 long
+        // subs. The ratio alone would condemn them; the frame count is what
+        // saves them, and it has to, because no file records the difference
+        // between a short series and a mistake.
+        let mut session = Session::new();
+        testing::run(&mut session, FrameKind::Light, "main", 226, light());
+        testing::run(&mut session, FrameKind::Light, "short", 20, info(2.0, 6400.0));
+
+        let partition = partitioned(&session);
+        assert!(
+            !partition.suspicions.iter().any(|s| matches!(s, Suspicion::MinorityOfKind { .. })),
+            "{:?}",
+            partition.suspicions
+        );
+    }
+
+    #[test]
+    fn a_short_session_is_not_all_minority() {
+        // Ten lights and nothing else: small, but it is the whole session, and
+        // there is no deeper series for it to be a minority of.
+        let mut session = Session::new();
+        testing::run(&mut session, FrameKind::Light, "L", 10, light());
+
+        let partition = partitioned(&session);
+        assert!(
+            !partition.suspicions.iter().any(|s| matches!(s, Suspicion::MinorityOfKind { .. })),
+            "{:?}",
+            partition.suspicions
+        );
     }
 
     #[test]

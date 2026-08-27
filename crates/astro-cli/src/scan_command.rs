@@ -58,6 +58,14 @@ pub struct ScanArgs {
     #[arg(long = "tolerance-exposure", id = "tolerance_exposure", value_name = "PERCENT")]
     pub tolerance_exposure: Option<f64>,
 
+    /// Leave this frame out, by file name. Repeatable.
+    ///
+    /// The frame is still read and still appears in the report, marked as
+    /// excluded by you, so a session that drops a frame never looks like one
+    /// that never had it.
+    #[arg(long, id = "exclude", value_name = "NAME")]
+    pub exclude: Vec<String>,
+
     /// Do not print progress while reading.
     #[arg(long, short, id = "quiet")]
     pub quiet: bool,
@@ -85,6 +93,7 @@ pub fn run(host: &PluginHost, args: &ScanArgs, matches: &ArgMatches) -> Result<(
         rules,
         recursive: !args.no_recurse,
         infer_from_paths: !args.no_infer,
+        excluded: args.exclude.clone(),
         ..Default::default()
     };
     let mut tolerances = Tolerances::default();

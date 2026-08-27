@@ -14,8 +14,8 @@ use rayon::prelude::*;
 
 use super::kind::{self, FrameKind};
 use super::{
-    BodyKey, FrameFingerprint, FrameId, FrameRecord, FrameRole, FrameSource, GroupId, Inference,
-    Rejection, Session,
+    BodyKey, Exclusion, ExclusionSource, FrameFingerprint, FrameId, FrameRecord, FrameRole,
+    FrameSource, GroupId, Inference, Rejection, Session,
 };
 use crate::error::{Error, Result};
 use crate::plugin::PluginHost;
@@ -57,6 +57,12 @@ pub struct ScanOptions {
     /// Read folder and file names as evidence. Proposals only; nothing is
     /// assigned from them.
     pub infer_from_paths: bool,
+    /// File names the user asked to leave out, compared without case.
+    ///
+    /// The frames are still scanned and still appear in the report, marked as
+    /// excluded by the user. Dropping them silently would make a session that
+    /// excludes a frame indistinguishable from one that never had it.
+    pub excluded: Vec<String>,
 }
 
 impl Default for ScanOptions {
@@ -66,6 +72,7 @@ impl Default for ScanOptions {
             recursive: true,
             open_budget_bytes: DEFAULT_OPEN_BUDGET_BYTES,
             infer_from_paths: true,
+            excluded: Vec::new(),
         }
     }
 }
@@ -248,6 +255,14 @@ fn insert(
     let plugin = session.intern_plugin(&scanned.plugin);
     let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
 
+    // Matched on the file name rather than the whole path: a name is what the
+    // report prints and what the user can copy back out of it.
+    let excluded = options
+        .excluded
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(file_name))
+        .then_some(Exclusion { reason: Rejection::Excluded, by: ExclusionSource::User });
+
     session.insert(FrameRecord {
         source: FrameSource {
             directory,
@@ -260,7 +275,7 @@ fn insert(
         info: scanned.info,
         role,
         group,
-        exclusion: None,
+        exclusion: excluded,
     })
 }
 

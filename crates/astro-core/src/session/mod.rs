@@ -273,6 +273,8 @@ pub enum Rejection {
     Incompatible { with: SetId, reason: Incompatibility },
     /// Nothing said what this frame is, and nothing could be inferred.
     Unclassified,
+    /// The user named this frame and asked for it to be left out.
+    Excluded,
 }
 
 impl std::fmt::Display for Rejection {
@@ -283,6 +285,7 @@ impl std::fmt::Display for Rejection {
             Self::Duplicate { of } => write!(f, "the same file is already in the session as frame {}", of.index()),
             Self::Incompatible { reason, .. } => write!(f, "{reason}"),
             Self::Unclassified => write!(f, "nothing says whether this is a light, dark, flat or bias"),
+            Self::Excluded => write!(f, "you asked for this one to be left out"),
         }
     }
 }

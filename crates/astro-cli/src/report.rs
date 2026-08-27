@@ -31,9 +31,25 @@ pub fn render(report: &ScanReport, partition: &Partition) {
     }
 
     print_splits(partition);
-    print_suspicions(partition);
+    print_suspicions(session, partition);
     print_unassigned(session, partition);
+    print_excluded(session);
     print_rejected(report);
+}
+
+fn print_excluded(session: &Session) {
+    let excluded: Vec<String> = session
+        .frames()
+        .iter()
+        .filter(|record| !record.is_active())
+        .map(|record| record.source.file_name.to_string())
+        .collect();
+    if excluded.is_empty() {
+        return;
+    }
+    println!();
+    println!("excluded by you  {}", format::plural(excluded.len(), "frame"));
+    println!("  {}", excluded.join(", "));
 }
 
 fn print_plan(partition: &Partition, plan_index: usize) {
@@ -157,19 +173,72 @@ fn print_splits(partition: &Partition) {
     }
 }
 
-fn print_suspicions(partition: &Partition) {
+fn print_suspicions(session: &Session, partition: &Partition) {
     if partition.suspicions.is_empty() {
         return;
     }
     println!();
     println!("worth a look");
+
+    // Minority sets are collected by kind rather than printed one by one: a
+    // night with four test frames produces four findings that say the same
+    // thing, and one line the user can paste is worth more than four they have
+    // to assemble.
+    for kind in FrameKind::ALL {
+        let mut sets = Vec::new();
+        let mut names = Vec::new();
+        let mut dominant = None;
+        for suspicion in &partition.suspicions {
+            let Suspicion::MinorityOfKind { set, members, dominant: big, dominant_members } =
+                suspicion
+            else {
+                continue;
+            };
+            let Some(frames) = partition.set(*set) else { continue };
+            if frames.kind() != kind {
+                continue;
+            }
+            sets.push((set.index(), *members));
+            dominant = Some((big.index(), *dominant_members));
+            names.extend(
+                frames
+                    .members
+                    .iter()
+                    .filter_map(|id| session.path(*id))
+                    .filter_map(|path| path.file_name().map(|n| n.to_string_lossy().into_owned())),
+            );
+        }
+        let Some((big, big_members)) = dominant else { continue };
+
+        let listed = sets
+            .iter()
+            .map(|(id, members)| format!("set {id} ({members})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  {:<8} {listed} beside set {big}'s {big_members} - too few frames to make a stack",
+            kind.name()
+        );
+        names.sort();
+        if !names.is_empty() {
+            println!("    --exclude {}", names.join(" --exclude "));
+        }
+    }
+
     for suspicion in &partition.suspicions {
-        println!("  {}", describe_suspicion(suspicion));
+        if !matches!(suspicion, Suspicion::MinorityOfKind { .. }) {
+            println!("  {}", describe_suspicion(suspicion));
+        }
     }
 }
 
 fn describe_suspicion(suspicion: &Suspicion) -> String {
     match suspicion {
+        // Rendered in `print_suspicions`, grouped by kind, because one line
+        // the user can paste beats four they have to assemble.
+        Suspicion::MinorityOfKind { set, members, .. } => {
+            format!("set {} holds only {}", set.index(), format::plural(*members, "frame"))
+        }
         Suspicion::BiasIsNotTheShortestExposure { set, seconds, shortest } => format!(
             "set {} is filed as bias but runs to {}, while the shortest frame in the session is {}. \
              Flats through a fast optic land here.",
