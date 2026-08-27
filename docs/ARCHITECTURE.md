@@ -234,6 +234,23 @@ not yet calibrate anything, is the wrong trade — so `BodyKey` carries
 reason that forces it, the change is one line in `BodyKey::from_info` and
 nothing that consumes a `BodyKey` moves.
 
+**A colour matrix the user can override.** One of the owner's bodies is a 60D
+he modified himself for astrophotography — the IR-cut filter is gone. rawler
+identifies it as a stock 60D, correctly, because that is what the firmware
+writes into the file, and hands out the stock 60D `xyz_to_cam` matrix. That
+matrix no longer describes the sensor: a filter-modified camera has a different
+spectral response, most of all in the deep red the modification exists to let
+through, and its as-shot white balance is off for the same reason.
+
+Nothing built so far is affected, and that is by design: `xyz_to_cam` and
+`wb_coeffs` are reported and never used to match frames, because white balance
+and the colour matrix are applied after stacking. But the moment this project
+produces a colour image, a per-body override becomes load-bearing rather than a
+nicety — a modified camera is the normal case in this field, not an edge case.
+The override belongs to the session, not to the plugin: a plugin reports what
+the file says, and what the file says about a modified body is stale rather than
+wrong.
+
 **Everything downstream.** Calibration and master generation, star detection,
 FWHM and trailing analysis, registration, stacking, and the Tauri user
 interface. The session model will grow to meet them; the ABI should not have to.
