@@ -71,7 +71,12 @@ pub struct ScanArgs {
     pub quiet: bool,
 }
 
-pub fn run(host: &PluginHost, args: &ScanArgs, matches: &ArgMatches) -> Result<()> {
+/// Turns the shared frame-selection options into what the session model wants.
+///
+/// Shared with `master` rather than duplicated: two commands that disagreed
+/// about what `--exclude` or `--group` means would be worse than either being
+/// wrong on its own.
+pub fn options_from(args: &ScanArgs, matches: &ArgMatches) -> Result<(ScanOptions, Tolerances)> {
     // Reserved rather than merely special: a group by this name is handed the
     // id whose calibration serves every other group, so accepting it would
     // silently drop the isolation the user asked for.
@@ -100,6 +105,12 @@ pub fn run(host: &PluginHost, args: &ScanArgs, matches: &ArgMatches) -> Result<(
     if let Some(percent) = args.tolerance_exposure {
         tolerances.exposure_relative = percent / 100.0;
     }
+    Ok((options, tolerances))
+}
+
+pub fn run(host: &PluginHost, args: &ScanArgs, matches: &ArgMatches) -> Result<()> {
+
+    let (options, tolerances) = options_from(args, matches)?;
 
     // A scan of five hundred frames takes long enough that silence reads as a
     // hang. Reporting at each tenth keeps the progress from being the slow part,

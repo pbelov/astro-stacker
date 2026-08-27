@@ -6,6 +6,7 @@
 
 mod format;
 mod report;
+mod master_command;
 mod scan_command;
 
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use astro_core::session::{ColourStats, FrameStats, illumination_map, measure};
 use astro_core::{OpenFrame, PluginHost, Samples, cfa_pattern_name, default_plugin_dirs};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
+use master_command::MasterArgs;
 use scan_command::ScanArgs;
 
 #[derive(Parser)]
@@ -40,6 +42,9 @@ enum Command {
     /// Read a session: group frames into stackable sets, match calibration to
     /// them, and say what does not fit.
     Scan(ScanArgs),
+
+    /// Combine a session's calibration frames into masters and write them.
+    Master(MasterArgs),
 
     /// Decode frames and report what the pixels say: where each colour sits
     /// between black and white, how much is clipped, and how evenly the frame
@@ -90,6 +95,12 @@ fn main() -> Result<()> {
         Command::Scan(args) => {
             let scan = matches.subcommand_matches("scan").expect("the scan subcommand was matched");
             scan_command::run(&host, args, scan)
+        }
+        Command::Master(args) => {
+            let sub = matches
+                .subcommand_matches("master")
+                .expect("the master subcommand was matched");
+            master_command::run(&host, args, sub)
         }
         Command::Measure { files, map } => measure_frames(&host, files, *map),
         Command::Info { files, decode } => describe_frames(&host, files, *decode),

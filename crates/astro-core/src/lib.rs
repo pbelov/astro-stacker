@@ -6,12 +6,14 @@
 //! a described, decodable frame, without the rest of the application knowing
 //! which plugin did it.
 
+pub mod calibrate;
 pub mod error;
 pub mod frame;
 pub mod plugin;
 pub mod session;
 
 pub use error::{Error, Result};
+pub use calibrate::{Master, apply, build};
 pub use frame::Samples;
 pub use plugin::{LoadReport, LoadedPlugin, OpenFrame, PluginHost, default_plugin_dirs};
 

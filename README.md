@@ -5,10 +5,11 @@ frames into one deep image. In the spirit of DeepSkyStacker, but faster, and
 built so that every image format is a plugin rather than a branch in a switch
 statement.
 
-**Status: 0.2.0 — it reads a session and measures a frame.** Point it at a
-night's folder and it groups the frames into stackable sets, matches darks,
-flats and biases to the lights, and names everything that does not fit. It does
-not stack anything yet.
+**Status: 0.5.0 — it calibrates.** Point it at a night's folder and it groups
+the frames into stackable sets, matches darks, flats and biases to the lights,
+names everything that does not fit, and combines the calibration frames into
+master frames written as 32-bit FITS. It does not register or integrate the
+lights yet.
 
 Verified against real frames from a Canon 5D Mark IV, a modified 60D, an R5 and
 an R5 Mark II, and against one complete 370-frame session: all decode at
@@ -58,6 +59,19 @@ Read a whole session:
 ```bash
 cargo run --release --bin astro-stacker -- scan --lights D:/astro/M31/lights --darks D:/astro/M31/darks --flats D:/astro/M31/flats --biases D:/astro/library/bias
 ```
+
+Combine the calibration frames into masters:
+
+```bash
+cargo run --release --bin astro-stacker -- master --lights D:/astro/M31/lights --darks D:/astro/M31/darks --flats D:/astro/M31/flats --biases D:/astro/library/bias -o D:/astro/M31/masters
+```
+
+Masters are written as 32-bit float FITS in ADU, in sensor readout order, with
+the Bayer pattern and what went into them in the header. Below six frames a set
+is combined by the median and nothing is rejected; from twenty-five up, by a
+mean clipped once at three sigma — a sample sigma from eleven frames is
+inflated by the very outlier it would catch, and no threshold can fire through
+that.
 
 `--group` puts the paths that follow it into a named group, for a per-night
 layout. Calibration named before any `--group` serves every group, which is how

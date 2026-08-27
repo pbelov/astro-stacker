@@ -53,6 +53,16 @@ pub enum Error {
     #[error("path {path} is not valid UTF-8, which plugins require")]
     NonUtf8Path { path: PathBuf },
 
+    /// A set with no active frames, or a frame whose layout describes nothing.
+    #[error("there is nothing to combine")]
+    NothingToCombine,
+
+    /// A flat whose zero point could not be measured. Deliberately fatal rather
+    /// than falling back to a plausible 2048: a normalisation taken on the
+    /// wrong zero is a multiplicative error on every light it touches.
+    #[error("the flat has no measurable pedestal: no masked border, and no bias at its gain")]
+    NoPedestal,
+
     #[error("could not read {path}")]
     Io {
         path: PathBuf,
