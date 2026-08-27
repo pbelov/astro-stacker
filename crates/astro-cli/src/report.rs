@@ -18,9 +18,9 @@ pub fn render(report: &ScanReport, partition: &Partition) {
     let session = &report.session;
 
     println!(
-        "scanned {} frames from {} files in {:.1}s, {} at a time",
-        session.len(),
-        session.len() + report.rejected.len(),
+        "scanned {} from {} in {:.1}s, {} at a time",
+        format::plural(session.len(), "frame"),
+        format::plural(session.len() + report.rejected.len(), "file"),
         report.elapsed.as_secs_f64(),
         report.workers
     );
@@ -45,9 +45,9 @@ fn print_plan(partition: &Partition, plan_index: usize) {
     for (kind, matched) in plan.calibration() {
         let Some(set) = partition.set(matched.set) else { continue };
         println!(
-            "  {:<10} {} frames, {}",
+            "  {:<10} {}, {}",
             kind.name(),
-            set.len(),
+            format::plural(set.len(), "frame"),
             describe_quality(matched)
         );
         for finding in &matched.mismatches {
@@ -81,7 +81,7 @@ fn print_plan(partition: &Partition, plan_index: usize) {
         );
         for (set, reason) in &blocked.candidates {
             let count = partition.set(*set).map_or(0, FrameSet::len);
-            println!("    {count} frames: {reason}");
+            println!("    {}: {reason}", format::plural(count, "frame"));
         }
     }
 
@@ -114,14 +114,14 @@ fn print_set_heading(set: &FrameSet) {
     let group = key.partition.group.as_ref();
 
     println!(
-        "set {}  {}  {}  {}  {}  {}  {} frames{}",
+        "set {}  {}  {}  {}  {}  {}  {}{}",
         set.id.index(),
         key.partition.kind.name(),
         key.partition.body.display(),
         key.partition.geometry.describe(),
         exposure,
         gain,
-        set.len(),
+        format::plural(set.len(), "frame"),
         if group == MAIN_GROUP { String::new() } else { format!("  [{group}]") }
     );
 }
@@ -210,7 +210,7 @@ fn print_unassigned(session: &Session, partition: &Partition) {
         return;
     }
     println!();
-    println!("unassigned  {} frames", partition.unassigned.len());
+    println!("unassigned  {}", format::plural(partition.unassigned.len(), "frame"));
     println!("  nothing in the path or the metadata says what these are, and guessing at a");
     println!("  calibration frame ruins a stack quietly rather than loudly");
 
@@ -294,7 +294,7 @@ fn print_rejected(report: &ScanReport) {
 
     if !duplicates.is_empty() {
         println!();
-        println!("already in the session  {} files", duplicates.len());
+        println!("already in the session  {}", format::plural(duplicates.len(), "file"));
         for (path, of) in duplicates.iter().take(10) {
             // Resolved to a path here rather than in `Rejection`'s Display,
             // which has no session to consult and can only print an index.
@@ -312,14 +312,14 @@ fn print_rejected(report: &ScanReport) {
 
     if !problems.is_empty() {
         println!();
-        println!("could not be read  {} files", problems.len());
+        println!("could not be read  {}", format::plural(problems.len(), "file"));
         for (path, reason) in problems {
             println!("  {}: {reason}", path.display());
         }
     }
     if !not_frames.is_empty() {
         println!();
-        println!("not frames  {} files", not_frames.len());
+        println!("not frames  {}", format::plural(not_frames.len(), "file"));
         for path in not_frames.iter().take(10) {
             println!("  {}", path.display());
         }

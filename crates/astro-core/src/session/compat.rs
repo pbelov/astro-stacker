@@ -116,6 +116,9 @@ pub enum Incompatibility {
     CameraModel { expected: String, found: String },
     /// Only ever raised for a dark or a bias against what it calibrates.
     Gain { expected: f64, found: f64 },
+    /// Two frames whose saturation points are a full stop or more apart are on
+    /// different scales, whatever they claim about bit depth.
+    Scale { expected: f32, found: f32 },
     /// A rule that had to run and could not. Distinct from a match: two frames
     /// that both failed to record their gain have not been shown to agree.
     Unrecorded { property: Property },
@@ -150,6 +153,10 @@ impl std::fmt::Display for Incompatibility {
             }
             Self::CameraModel { expected, found } => write!(f, "shot on {found}, not {expected}"),
             Self::Gain { expected, found } => write!(f, "ISO {found:.0}, expected ISO {expected:.0}"),
+            Self::Scale { expected, found } => write!(
+                f,
+                "saturates at {found:.0}, expected {expected:.0} - the two are not on one scale"
+            ),
             Self::Unrecorded { property } => {
                 write!(f, "{property} was not recorded, so it could not be matched")
             }
@@ -443,9 +450,12 @@ pub fn compatible(expected: &GeometryKey, found: &GeometryKey) -> Result<(), Inc
             found: found.sample_format,
         });
     }
-    // Same photosites, numbers differing by a factor of four: the R5 shoots
-    // 14 bit on the mechanical shutter and 12 bit in some electronic modes, at
-    // identical geometry. A bare "different sizes" check would never see it.
+    // Kept, but weak, and the comment has to say so: `bits_per_sample` is
+    // whatever the plugin reports as the width of the *container*, not of the
+    // converter. rawler defaults it to 16 for every camera whose database entry
+    // does not override it, which is most of them, so on Canon frames this
+    // rule compares 16 against 16 and passes. The saturation check below is
+    // what actually catches two frames on different scales.
     if expected.bits_per_sample != found.bits_per_sample {
         return Err(Incompatibility::BitDepth {
             expected: expected.bits_per_sample,
@@ -469,6 +479,35 @@ pub fn compatible(expected: &GeometryKey, found: &GeometryKey) -> Result<(), Inc
     Ok(())
 }
 
+/// A full stop. Below this two saturation points are one sensor's ordinary
+/// variation between modes; at or above it they are different converters, and
+/// `light[i] - dark[i]` under-subtracts by the whole factor.
+const SCALE_REFUSAL_RATIO: f32 = 2.0;
+
+/// Whether two frames report saturation points that put them on one scale.
+///
+/// This is the rule `bits_per_sample` was supposed to be. The declared bit
+/// depth is a container width and is usually a default; the white level is
+/// measured per camera and per mode, so a 12-bit readout really does report
+/// about 4095 where a 14-bit one reports about 16383.
+///
+/// `Ok(())` when either side is unrecorded: unlike gain, there is a second rule
+/// covering this ground, so refusing on an absence here would throw away frames
+/// a bit-depth match has already vouched for.
+fn same_scale(expected: &ImageLayout, found: &ImageLayout) -> Result<(), Incompatibility> {
+    let (Some(a), Some(b)) = (saturation(expected), saturation(found)) else {
+        return Ok(());
+    };
+    if a <= 0.0 || b <= 0.0 {
+        return Ok(());
+    }
+    let ratio = a.max(b) / a.min(b);
+    if ratio >= SCALE_REFUSAL_RATIO {
+        return Err(Incompatibility::Scale { expected: a, found: b });
+    }
+    Ok(())
+}
+
 /// [`compatible`], plus the hard rules that depend on the pairing rather than on
 /// the geometry.
 pub fn admissible(
@@ -477,6 +516,10 @@ pub fn admissible(
     pairing: Pairing,
 ) -> Result<(), Incompatibility> {
     compatible(&GeometryKey::from_layout(&expected.layout), &GeometryKey::from_layout(&found.layout))?;
+    // Not part of `compatible`, which works from a `GeometryKey` and so cannot
+    // see the white level. It belongs with the hard rules all the same: two
+    // frames on different scales subtract wrongly by that whole factor.
+    same_scale(&expected.layout, &found.layout)?;
 
     // The hot-pixel map and the fixed-pattern noise belong to the individual
     // sensor. Deliberately not applied within a light set: two bodies of one
@@ -791,6 +834,38 @@ mod tests {
                 found: Some("GRBG".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn frames_on_different_scales_are_refused_even_when_the_bit_depth_agrees() {
+        // The rule `bits_per_sample` was supposed to be. rawler reports the
+        // container width and defaults it to 16, so on a real Canon frame that
+        // field is 16 whether the converter ran at 14 bits or 12. The white
+        // level is measured per camera and per mode, and it is not.
+        let fourteen = testing::record("a.cr3", light());
+        let mut twelve = testing::record("b.cr3", light());
+        assert_eq!(fourteen.layout.bits_per_sample, twelve.layout.bits_per_sample);
+        twelve.layout.white_level = [4095.0; 4];
+
+        let refusal = admissible(&fourteen, &twelve, Pairing::SameStack).unwrap_err();
+        assert!(matches!(refusal, Incompatibility::Scale { .. }), "got {refusal:?}");
+    }
+
+    #[test]
+    fn ordinary_variation_between_canon_bodies_is_not_a_scale_refusal() {
+        // The saturation points the four test cameras actually report: 14448 on
+        // the 5D Mark IV, 14888 on the R5, 15094 on the 60Da. All one scale.
+        let mut a = testing::record("a.cr3", light());
+        let mut b = testing::record("b.cr3", light());
+        a.layout.white_level = [14448.0; 4];
+        b.layout.white_level = [15094.0; 4];
+        assert!(admissible(&a, &b, Pairing::SameStack).is_ok());
+
+        // And an unrecorded white level is not a refusal: the bit-depth rule
+        // still covers this ground, so refusing on an absence would throw away
+        // frames it has already vouched for.
+        b.layout.white_level = [f32::NAN; 4];
+        assert!(admissible(&a, &b, Pairing::SameStack).is_ok());
     }
 
     #[test]

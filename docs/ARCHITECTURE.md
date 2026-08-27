@@ -145,6 +145,26 @@ while the whole run's span stays inside the tolerance of its longest member is
 what stops a night of sixty-second subs chaining into a night of six-hundred
 second ones.
 
+### Bit depth is a container width, not a scale
+
+`ImageLayout::bits_per_sample` is whatever the plugin reports as the width of
+the container, and for the Canon plugin that is rawler's `real_bps`, which
+defaults to 16 for every camera whose database entry does not override it.
+Measured on real frames: the 5D Mark IV, R5 and R5 Mark II all report 16 while
+their converters run at 14 bits, and only the 60D reports 14 — because its
+database entry happens to say so.
+
+So the bit-depth rule cannot do the job it was written for. The saturation
+point can: rawler derives it per camera and per mode, and the four bodies report
+14448, 15094, 14888 and 14888 — one scale, ordinary variation. A 12-bit readout
+would report about 4095. `same_scale` therefore refuses two frames whose white
+levels differ by a factor of two or more, and that is the load-bearing check;
+the bit-depth comparison stays as a cheap first pass.
+
+Neither refuses on an absence. Unlike gain, where nothing else covers the
+ground, these two rules back each other up, so an unrecorded white level is
+reported rather than fatal.
+
 ### `read_samples` returns sensor readout order
 
 A plugin must never permute the buffer to honour `ImageLayout::orientation`.

@@ -135,6 +135,15 @@ pub fn scan_with_progress(
     }
     candidates.sort();
     candidates.dedup();
+    // Two copies of one frame are found by content later, and the first one
+    // inserted is the one that stays. Order so that a copy the user assigned a
+    // kind to always comes first: otherwise `--lights D:/lights D:/misc` keeps
+    // whichever path sorts earlier, and if that is the unassigned copy in misc,
+    // the light is dropped from the stack without anything looking wrong.
+    candidates.sort_by_key(|path| {
+        let assigned = deepest_rule(&rules, path).and_then(|rule| rule.kind).is_some();
+        (!assigned, path.clone())
+    });
 
     // One frame opened serially, to size the pool against the frames actually
     // present rather than against a guess.
@@ -422,6 +431,33 @@ mod tests {
         assert_eq!(dark.and_then(|rule| rule.kind), Some(FrameKind::Dark));
 
         assert_eq!(deepest_rule(&rules, Path::new("D:/elsewhere/x.CR3")), None);
+    }
+
+    #[test]
+    fn an_assigned_copy_outranks_an_unassigned_one() {
+        // Which of two identical files survives deduplication is decided here,
+        // by the order they are opened in.
+        let rules = vec![
+            RoleRule::new("D:/misc", None),
+            RoleRule::new("D:/lights", Some(FrameKind::Light)),
+        ];
+        let mut candidates =
+            [PathBuf::from("D:/misc/copy.CR3"), PathBuf::from("D:/lights/IMG_0001.CR3")];
+        candidates.sort();
+        assert_eq!(candidates[0], PathBuf::from("D:/lights/IMG_0001.CR3"));
+
+        // Now the case that bites: the unassigned folder sorts first.
+        let mut candidates =
+            [PathBuf::from("D:/lights/IMG_0001.CR3"), PathBuf::from("D:/misc/copy.CR3")];
+        candidates.sort_by_key(|path| {
+            let assigned = deepest_rule(&rules, path).and_then(|rule| rule.kind).is_some();
+            (!assigned, path.clone())
+        });
+        assert_eq!(
+            candidates[0],
+            PathBuf::from("D:/lights/IMG_0001.CR3"),
+            "the frame the user named must be the one that stays"
+        );
     }
 
     #[test]

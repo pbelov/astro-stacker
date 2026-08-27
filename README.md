@@ -5,9 +5,13 @@ frames into one deep image. In the spirit of DeepSkyStacker, but faster, and
 built so that every image format is a plugin rather than a branch in a switch
 statement.
 
-**Status: 0.1.0 — it reads a session.** Point it at a night's folder and it
+**Status: 0.1.2 — it reads a session.** Point it at a night's folder and it
 groups the frames into stackable sets, matches darks, flats and biases to the
 lights, and names everything that does not fit. It does not stack anything yet.
+
+Verified against real frames from a Canon 5D Mark IV, 60Da, R5 and R5 Mark II:
+all four decode at 190–200 Mpx/s, which puts a 45-megapixel CR3 at a quarter of
+a second.
 
 ## What is here
 

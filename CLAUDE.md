@@ -55,7 +55,9 @@ invoking `export_plugin!`. It must not be a branch added to an existing plugin.
 ## Verification needs real frames
 
 Unit tests cover the pure logic. Anything touching a decoder has to be run
-against actual CR2/CR3 files, which are not in the repository:
+against actual CR2/CR3 files. Four are in `testdata/`, one from each of the
+owner's bodies (5D Mark IV, 60Da, R5, R5 Mark II); the directory is gitignored,
+so the files are on this machine only.
 
 ```bash
 cargo run --release --bin astro-stacker -- info --decode <file>

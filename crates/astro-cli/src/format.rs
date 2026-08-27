@@ -26,6 +26,11 @@ pub fn trim_zeros(value: f64, decimals: usize) -> String {
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
+/// Pluralises a count, so that a one-frame set does not read as "1 frames".
+pub fn plural(count: usize, noun: &str) -> String {
+    if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") }
+}
+
 /// Renders seconds-since-the-epoch as `YYYY-MM-DD HH:MM:SS`.
 ///
 /// EXIF timestamps carry no time zone, and the Canon plugin reads them as UTC,
@@ -75,6 +80,13 @@ mod tests {
         assert_eq!(timestamp(946_684_800), "2000-01-01 00:00:00");
         assert_eq!(timestamp(1_787_834_096), "2026-08-27 12:34:56");
         assert_eq!(timestamp(951_782_400), "2000-02-29 00:00:00");
+    }
+
+    #[test]
+    fn a_single_frame_is_not_called_one_frames() {
+        assert_eq!(plural(1, "frame"), "1 frame");
+        assert_eq!(plural(0, "frame"), "0 frames");
+        assert_eq!(plural(124, "frame"), "124 frames");
     }
 
     #[test]
