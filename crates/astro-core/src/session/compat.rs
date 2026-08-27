@@ -169,7 +169,14 @@ impl std::fmt::Display for Incompatibility {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mismatch {
     Exposure { expected: f64, found: f64 },
-    Gain { expected: f64, found: f64 },
+    /// Carries its own severity, because what a gain difference means depends
+    /// entirely on the pairing. Between a flat and its lights it is not a fault
+    /// at all: a flat is normalised to unit mean before it divides anything, so
+    /// its gain carries no information, and shooting flats at base ISO is
+    /// better practice than matching the lights — deeper wells, less shot noise
+    /// in the master, and the master divides into every light. Warning about
+    /// the correct thing to do teaches the user to skip warnings.
+    Gain { expected: f64, found: f64, severity: Severity },
     SensorTemperature { expected: f64, found: f64, severity: Severity },
     BlackLevel { expected: f32, found: f32 },
     WhiteLevel { expected: f32, found: f32 },
@@ -200,15 +207,19 @@ impl Mismatch {
             // A named lens that differs is the strongest metadata evidence that
             // a flat does not belong to these lights, so it is louder than the
             // numeric properties beside it.
+            Self::Gain { severity, .. } => *severity,
+            // Aperture and focal length are the only metadata proxies for the
+            // optical train that exist, and a flat records the illumination
+            // geometry that train produces. A difference here means the flat
+            // was shot through something other than what took the lights.
             Self::Exposure { .. }
-            | Self::Gain { .. }
             | Self::Elapsed { .. }
-            | Self::LensModel { .. } => Severity::Warning,
+            | Self::LensModel { .. }
+            | Self::OpticalTrain { .. } => Severity::Warning,
             Self::BlackLevel { .. }
             | Self::WhiteLevel { .. }
             | Self::Orientation { .. }
             | Self::CameraModel { .. }
-            | Self::OpticalTrain { .. }
             | Self::Unrecorded { .. } => Severity::Note,
         }
     }
@@ -220,7 +231,9 @@ impl std::fmt::Display for Mismatch {
             Self::Exposure { expected, found } => {
                 write!(f, "exposure {found} s against {expected} s")
             }
-            Self::Gain { expected, found } => write!(f, "ISO {found:.0} against ISO {expected:.0}"),
+            Self::Gain { expected, found, .. } => {
+                write!(f, "ISO {found:.0} against ISO {expected:.0}")
+            }
             Self::SensorTemperature { expected, found, .. } => {
                 write!(f, "sensor at {found:.1} C against {expected:.1} C")
             }
@@ -577,7 +590,15 @@ pub fn differences(
     if !pairing.gain_must_match() {
         match (expected.info.iso, found.info.iso) {
             (Some(a), Some(b)) if (a - b).abs() > f64::EPSILON => {
-                findings.push(Mismatch::Gain { expected: a, found: b });
+                // A flat is normalised before division, so its gain is not a
+                // fault; anywhere else a gain difference is a scale factor
+                // somebody has to account for.
+                let severity = if pairing == Pairing::FlatToLight {
+                    Severity::Note
+                } else {
+                    Severity::Warning
+                };
+                findings.push(Mismatch::Gain { expected: a, found: b, severity });
             }
             (Some(_), Some(_)) => {}
             // Two absences are not agreement here either, and this is the
@@ -923,6 +944,40 @@ mod tests {
         // Absent or nonsensical values are never "the same".
         assert!(!same_exposure(0.0, 0.0, &tolerances));
         assert!(!same_exposure(f64::NAN, 300.0, &tolerances));
+    }
+
+    #[test]
+    fn a_flat_at_base_iso_is_noted_and_not_warned_about() {
+        // Shooting flats at ISO 100 against ISO 6400 lights is better practice,
+        // not worse: the flat is normalised before it divides anything, and the
+        // deeper well makes the master quieter. Warning about it would teach
+        // the user to skip warnings.
+        let lights = testing::record("light.cr3", light());
+        let flats = testing::record("flat.cr3", testing::info(1.0 / 500.0, 100.0));
+
+        let findings = differences(&lights, &flats, Pairing::FlatToLight, &Tolerances::default());
+        let gain = findings
+            .iter()
+            .find(|m| matches!(m, Mismatch::Gain { .. }))
+            .expect("still reported, just quietly");
+        assert_eq!(gain.severity(), Severity::Note);
+    }
+
+    #[test]
+    fn a_flat_shot_at_another_aperture_is_warned_about() {
+        // The failure this project met in real data: flats at f/11 against
+        // f/5.6 lights record almost none of the vignetting the lights have.
+        let mut lights = testing::record("light.cr3", light());
+        let mut flats = testing::record("flat.cr3", flat());
+        lights.info.aperture = Some(5.6);
+        flats.info.aperture = Some(11.0);
+
+        let findings = differences(&lights, &flats, Pairing::FlatToLight, &Tolerances::default());
+        let optics = findings
+            .iter()
+            .find(|m| matches!(m, Mismatch::OpticalTrain { property: Property::Aperture, .. }))
+            .expect("an aperture difference is reported");
+        assert_eq!(optics.severity(), Severity::Warning);
     }
 
     #[test]
