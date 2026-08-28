@@ -11,6 +11,7 @@ mod master_command;
 mod plan;
 mod register_command;
 mod scan_command;
+mod survey;
 mod stars_command;
 
 use std::path::{Path, PathBuf};

@@ -10,47 +10,27 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use astro_core::calibrate::apply;
+use astro_core::PluginHost;
 use astro_core::register::{Fitted, MatchOptions, Registration, Transform, refine, register};
-use astro_core::session::{FrameId, Session};
-use astro_core::stars::{DetectOptions, detect};
-use astro_core::{PluginHost, Samples};
 use astro_core::stars::Star;
 use clap::{ArgMatches, Args};
 
 use crate::format;
-use crate::master_command::{MasterSet, build_masters};
-use crate::scan_command::{ScanArgs, options_from};
+use crate::scan_command::ScanArgs;
+use crate::survey::{SurveyArgs, Surveyed};
 
 #[derive(Args, Debug)]
 pub struct RegisterArgs {
     #[command(flatten)]
     pub scan: ScanArgs,
 
-    /// How many lights to register. All of them by default.
-    #[arg(long, value_name = "N")]
-    pub frames: Option<usize>,
+    #[command(flatten)]
+    pub survey: SurveyArgs,
 
-    /// Skip this many lights first.
-    #[arg(long, value_name = "N", default_value_t = 0)]
-    pub skip: usize,
-
-    /// Register every Nth light rather than every one.
-    #[arg(long, value_name = "N", default_value_t = 1)]
-    pub step: usize,
-
-    /// Register against this frame rather than one chosen from the middle of the
-    /// run. Give the file stem, as printed.
+    /// Register against this frame rather than one chosen from the middle of
+    /// the run. Give the file stem, as printed.
     #[arg(long, value_name = "NAME")]
     pub reference: Option<String>,
-
-    /// Detect on the raw frame instead of calibrating first.
-    #[arg(long)]
-    pub raw: bool,
-
-    /// How many times the noise a peak must stand above the sky to count.
-    #[arg(long, value_name = "SIGMA", default_value_t = 5.0)]
-    pub sigma: f32,
 
     /// How many of the brightest stars to match with. Generous on purpose: the
     /// top of a brightness ranking is the least stable part of it, because
@@ -68,13 +48,23 @@ pub struct RegisterArgs {
     pub each: bool,
 }
 
-struct Frame {
-    name: String,
-    stars: Vec<Star>,
+/// One surveyed light, plus where registering it landed.
+struct Frame<'a> {
+    read: &'a Surveyed,
     registration: Option<Registration>,
     /// How the frame was seeded, for the report: a run where most frames needed
     /// the chain is a run that drifted, and that is worth knowing.
     seeded: Seed,
+}
+
+impl Frame<'_> {
+    fn name(&self) -> &str {
+        &self.read.name
+    }
+
+    fn stars(&self) -> &[Star] {
+        &self.read.detection.stars
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,76 +72,37 @@ enum Seed {
     /// Matched against the reference directly, by voting for the most popular
     /// offset. What a frame near the reference can afford.
     Vote,
-    /// Seeded by carrying the answer along the run from neighbour to neighbour,
-    /// then fitted against the reference directly.
+    /// Seeded by carrying the answer along the run from neighbour to
+    /// neighbour, then fitted against the reference directly.
     Chain,
     None,
 }
 
 pub fn run(host: &PluginHost, args: &RegisterArgs, matches: &ArgMatches) -> Result<()> {
-    if args.step == 0 {
-        bail!("--step 0 would register no frames");
-    }
-    let (options, tolerances) = options_from(&args.scan, matches)?;
-    let report = astro_core::session::scan(host, &options)?;
-    let partition = report.session.partition(&tolerances);
-
-    let chosen = crate::plan::choose(&report.session, &partition, args.scan.set)?;
-    chosen.announce(&report.session);
-    let (plan, lights) = (chosen.plan, chosen.lights);
-
-    let masters = if args.raw {
-        MasterSet::default()
-    } else {
-        build_masters(
-            host,
-            &report.session,
-            &partition,
-            plan,
-            &Default::default(),
-            &std::env::temp_dir(),
-            false,
-            args.scan.quiet,
-        )?
-    };
-
-    let selected: Vec<FrameId> = lights
-        .members
-        .iter()
-        .copied()
-        .filter(|id| report.session[*id].is_active())
-        .skip(args.skip)
-        .step_by(args.step)
-        .take(args.frames.unwrap_or(usize::MAX))
-        .collect();
-    if selected.len() < 2 {
-        bail!("registration needs at least two lights, and this run offers {}", selected.len());
-    }
-
-    let detect_options = DetectOptions { detect_sigma: args.sigma, ..Default::default() };
-    println!("\nfinding stars in {}", format::plural(selected.len(), "light"));
-    let started = Instant::now();
-    let mut frames: Vec<Frame> = Vec::with_capacity(selected.len());
-    for id in selected {
-        match stars_of(host, &report.session, id, &masters, &detect_options) {
-            Ok(frame) => frames.push(frame),
-            Err(error) => eprintln!("warning: {error:#}"),
-        }
-    }
-    if frames.len() < 2 {
-        bail!("fewer than two frames yielded stars, so there is nothing to register against");
+    let survey = crate::survey::read(host, &args.scan, matches, &args.survey)?;
+    if survey.frames.len() < 2 {
+        bail!(
+            "registration needs at least two lights, and this run offered {}",
+            survey.frames.len()
+        );
     }
     println!(
         "  found stars in {} in {:.1}s",
-        format::plural(frames.len(), "frame"),
-        started.elapsed().as_secs_f64()
+        format::plural(survey.frames.len(), "frame"),
+        survey.seconds
     );
+
+    let mut frames: Vec<Frame> = survey
+        .frames
+        .iter()
+        .map(|read| Frame { read, registration: None, seeded: Seed::None })
+        .collect();
 
     let reference = choose_reference(&frames, args.reference.as_deref())?;
     println!(
         "  reference  {} ({} stars, frame {} of {})",
-        frames[reference].name,
-        frames[reference].stars.len(),
+        frames[reference].name(),
+        frames[reference].stars().len(),
         reference + 1,
         frames.len()
     );
@@ -161,30 +112,32 @@ pub fn run(host: &PluginHost, args: &RegisterArgs, matches: &ArgMatches) -> Resu
     let (seeds, links) = chain_seeds(&frames, reference, args.span, &match_options);
     let unreached = seeds.iter().filter(|seed| seed.is_none()).count();
 
-    // Split so the reference can be borrowed while the rest are written.
-    let anchor: Vec<Star> = frames[reference].stars.clone();
-    for (index, frame) in frames.iter_mut().enumerate() {
+    // Cloned so the reference can be read while the rest are written.
+    let anchor: Vec<Star> = frames[reference].stars().to_vec();
+    for index in 0..frames.len() {
         if index == reference {
-            frame.registration = Some(Registration {
+            frames[index].registration = Some(Registration {
                 transform: Transform::IDENTITY,
                 fitted: Fitted::Similarity,
-                matched: frame.stars.len(),
+                matched: frames[index].stars().len(),
                 residual: 0.0,
             });
-            frame.seeded = Seed::Vote;
+            frames[index].seeded = Seed::Vote;
             continue;
         }
-        // The chained guess first, since it is the one that works at a distance,
-        // and the vote as the fallback for a frame the chain could not reach.
-        if let Some(seed) = seeds[index]
-            && let Some(found) = refine(&anchor, &frame.stars, seed, &match_options)
-        {
-            frame.registration = Some(found);
-            frame.seeded = Seed::Chain;
+        // The chained guess first, since it is the one that works at a
+        // distance, and the vote as the fallback for a frame the chain could
+        // not reach.
+        let chained = seeds[index]
+            .and_then(|seed| refine(&anchor, frames[index].stars(), seed, &match_options));
+        if let Some(found) = chained {
+            frames[index].registration = Some(found);
+            frames[index].seeded = Seed::Chain;
             continue;
         }
-        frame.registration = register(&anchor, &frame.stars, &match_options);
-        frame.seeded = if frame.registration.is_some() { Seed::Vote } else { Seed::None };
+        frames[index].registration = register(&anchor, frames[index].stars(), &match_options);
+        frames[index].seeded =
+            if frames[index].registration.is_some() { Seed::Vote } else { Seed::None };
     }
     println!(
         "  registered in {:.1}s, the chain of {links} links reaching {} of {}",
@@ -193,7 +146,7 @@ pub fn run(host: &PluginHost, args: &RegisterArgs, matches: &ArgMatches) -> Resu
         frames.len()
     );
 
-    summarise(&frames, reference, args.each);
+    summarise(&frames, reference, args.each, &survey.failed);
     Ok(())
 }
 
@@ -217,7 +170,7 @@ pub fn run(host: &PluginHost, args: &RegisterArgs, matches: &ArgMatches) -> Resu
 /// actually shows on real data. Reaching each frame in the fewest hops also
 /// keeps the guess as good as it can be.
 fn chain_seeds(
-    frames: &[Frame],
+    frames: &[Frame<'_>],
     reference: usize,
     span: usize,
     options: &MatchOptions,
@@ -236,7 +189,7 @@ fn chain_seeds(
             }
             // The transform that maps `there` onto `here`, then `here` onto the
             // reference. Composed this way round, no inverse is ever needed.
-            let Some(link) = register(&frames[here].stars, &frames[there].stars, options) else {
+            let Some(link) = register(frames[here].stars(), frames[there].stars(), options) else {
                 continue;
             };
             links += 1;
@@ -247,58 +200,32 @@ fn chain_seeds(
     (seeds, links)
 }
 
-fn stars_of(
-    host: &PluginHost,
-    session: &Session,
-    id: FrameId,
-    masters: &MasterSet,
-    options: &DetectOptions,
-) -> Result<Frame> {
-    let path = session.path(id).context("a frame with no path")?;
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-
-    let frame = host.open(&path).with_context(|| format!("opening {}", path.display()))?;
-    let Samples::U16(raw) = frame.decode().with_context(|| format!("decoding {}", path.display()))?
-    else {
-        bail!("{name}: floating-point sensor data is not registered yet");
-    };
-    let pixels = if masters.dark.is_some() || masters.flat.is_some() {
-        apply(&raw, masters.dark.as_ref(), masters.flat.as_ref(), frame.layout()).0
-    } else {
-        raw.iter().map(|value| f32::from(*value)).collect()
-    };
-    let detection = detect(&pixels, &raw, frame.layout(), options)
-        .with_context(|| format!("{name}: no measurable sky to threshold against"))?;
-
-    Ok(Frame { name, stars: detection.stars, registration: None, seeded: Seed::None })
-}
-
 /// The frame everything else is measured against.
 ///
 /// From the middle of the run unless the user names one, because drift
 /// accumulates and the middle is the frame with the least of it between itself
 /// and the ends. Among the middle third, the one with the most stars: a
 /// reference thin on stars limits every match made against it.
-fn choose_reference(frames: &[Frame], named: Option<&str>) -> Result<usize> {
+fn choose_reference(frames: &[Frame<'_>], named: Option<&str>) -> Result<usize> {
     if let Some(wanted) = named {
         return frames
             .iter()
-            .position(|frame| frame.name == wanted)
+            .position(|frame| frame.name() == wanted)
             .with_context(|| format!("no light called {wanted} was measured"));
     }
     let third = frames.len() / 3;
     let window = third..frames.len().saturating_sub(third).max(third + 1);
     window
         .clone()
-        .max_by_key(|index| frames[*index].stars.len())
+        .max_by_key(|index| frames[*index].stars().len())
         .with_context(|| format!("the run has no middle to choose from: {window:?}"))
 }
 
-fn summarise(frames: &[Frame], reference: usize, each: bool) {
+fn summarise(frames: &[Frame<'_>], reference: usize, each: bool, unread: &[(String, String)]) {
     // The frame centre, from the reference's own stars: registration reports how
     // far a point moved, and the point that means anything is the middle of the
     // frame rather than the corner the coordinates start at.
-    let (cx, cy) = centre_of(&frames[reference].stars);
+    let (cx, cy) = centre_of(frames[reference].stars());
 
     if each {
         println!();
@@ -319,10 +246,10 @@ fn summarise(frames: &[Frame], reference: usize, each: bool) {
                     println!(
                         "  {:<24} dx {:>8.2}  dy {:>8.2}  turn {turn}  scale {scale} ppm  \
                          {:>4} pairs at {:.2} px",
-                        frame.name, dx, dy, found.matched, found.residual
+                        frame.name(), dx, dy, found.matched, found.residual
                     );
                 }
-                None => println!("  {:<24} did not register", frame.name),
+                None => println!("  {:<24} did not register", frame.name()),
             }
         }
     }
@@ -334,6 +261,15 @@ fn summarise(frames: &[Frame], reference: usize, each: bool) {
     let failed: Vec<&Frame> = frames.iter().filter(|frame| frame.registration.is_none()).collect();
 
     println!();
+    if !unread.is_empty() {
+        // Distinct from a frame that registered badly: this one never produced
+        // stars to register with.
+        println!("{} could not be read at all:", format::plural(unread.len(), "frame"));
+        for (name, why) in unread {
+            println!("  {name:<24} {why}");
+        }
+        println!();
+    }
     if !failed.is_empty() {
         // A frame that would not register is not a frame to stack, and it is
         // the one the user most needs named.
@@ -343,7 +279,7 @@ fn summarise(frames: &[Frame], reference: usize, each: bool) {
             format::plural(failed.len(), "frame")
         );
         for frame in &failed {
-            println!("  {:<24} {} stars found", frame.name, frame.stars.len());
+            println!("  {:<24} {} stars found", frame.name(), frame.stars().len());
         }
         println!();
     }
@@ -415,9 +351,12 @@ fn summarise(frames: &[Frame], reference: usize, each: bool) {
     // larger means the field is doing something a similarity cannot describe.
     let chained = frames.iter().filter(|frame| frame.seeded == Seed::Chain).count();
     if chained > 0 {
+        // Not a claim that these could not have been matched directly. The
+        // chained guess is simply tried first, because it is the one that works
+        // at a distance, so the direct vote was never run on them.
         println!(
-            "  {chained} of them were out of the reference's reach on their own and were seeded \
-             by the chain of neighbours"
+            "  {chained} were seeded by the chain of neighbours rather than matched to the \
+             reference directly"
         );
     }
     let shift_only = registered.iter().filter(|(_, found)| found.fitted == Fitted::Shift).count();
