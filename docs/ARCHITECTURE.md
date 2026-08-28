@@ -174,6 +174,54 @@ two frames of one sensor must always agree on what `samples[i]` is, whichever
 way the camera was pointing. Orientation is therefore a note on a flat, never a
 reason to refuse a frame.
 
+### Stars are found on the raw mosaic, at full resolution
+
+Detection thresholds each photosite against its own colour's local sky and its
+own colour's local noise, on the undemosaiced frame. Nothing is binned or
+reduced to green.
+
+The worry this answers is that a small star landing on a red photosite and the
+same star landing on a green one would be found in different places. The colour
+modulation of a Bayer pattern is a signal at exactly the Nyquist frequency, so
+when a source is centred on a photosite the modulated part is even about that
+centre and contributes nothing to the first moment. Measured on 763 stars
+matched between two consecutive frames of the reference session, the mosaic's
+own contribution to the centroid is 0.005 to 0.018 photosites, against two to
+five times that from ordinary aperture truncation, which has nothing to do with
+colour. Binning two by two was measured against it and is worse: it turns a
+0.015 px problem into a 0.08 to 0.18 px one, because the cross-trail width of a
+star on this rig is about 1.9 photosites and binning pushes that axis below
+Nyquist.
+
+### Second moments are measured under a matched window, never over the footprint
+
+The natural estimator — flux times displacement squared, summed over the
+threshold footprint — reported the reference session's stars as 4.16 photosites
+across where they are 2.07. The footprint is grown on the *filtered* plane, so
+it reaches out past where the unsmoothed star has any flux left and its outer
+ring is noise; the weight in a second moment is displacement squared, which is
+largest exactly there; and dropping the negative half of that noise — which the
+natural `value <= 0.0` guard does — leaves a one-sided positive residual at the
+worst possible radius.
+
+So each source is weighted by a Gaussian of its own covariance, iterated to a
+fixed point. For a Gaussian source under a Gaussian window the measured
+covariance is the harmonic combination of the two, so twice the measurement is
+the window to try next and the fixed point is the source itself. A fit that does
+not converge yields `Moments::NONE` and keeps its position: registration wants
+positions, and the frame's shape statistics are better off without a guess.
+
+### A position angle is spin-2 and is never averaged as an angle
+
+An ellipse at 179 degrees and one at 1 degree point almost the same way, and
+their arithmetic mean is 90 — perpendicular to both. The reference session's own
+trail sits at 94 degrees, close enough to the branch cut of the obvious
+implementation to matter. Frame shape is therefore the median of the moment
+*matrix*, which is a tensor average and cannot cross a cut, and the consistency
+of the direction is a separate number: the length of the mean of
+`(cos 2t, sin 2t)`. That separation is what distinguishes a tracking rate error,
+which points one way in every frame, from wind, which does not.
+
 ## Layout
 
 ```
@@ -183,6 +231,11 @@ crates/astro-core         plugin host, frame model, and the session:
     session/compat.rs       whether two frames may be indexed against each other
     session/sets.rs         partitioning, and matching calibration to lights
     session/scan.rs         walking paths into a session
+    session/mosaic.rs       which colour a photosite carries, shared by all passes
+    calibrate/              masters, pedestal, combination, FITS
+    stars/sky.rs            per-colour background and noise on a coarse grid
+    stars/shape.rs          moments, trailing, and spin-2 direction arithmetic
+    stars/mod.rs            detection, footprints, and windowed measurement
 crates/astro-cli          the astro-stacker binary
 plugins/astro-format-canon  CR2/CR3, via rawler
 ```

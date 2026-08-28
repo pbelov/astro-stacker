@@ -10,6 +10,7 @@ mod calibrate_command;
 mod master_command;
 mod plan;
 mod scan_command;
+mod stars_command;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -21,6 +22,7 @@ use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
 use calibrate_command::CalibrateArgs;
 use master_command::MasterArgs;
 use scan_command::ScanArgs;
+use stars_command::StarsArgs;
 
 #[derive(Parser)]
 #[command(name = "astro-stacker", version, about = "Stacking for deep-sky astrophotography")]
@@ -51,6 +53,11 @@ enum Command {
 
     /// Apply a session's masters to its lights and write the result.
     Calibrate(CalibrateArgs),
+
+    /// Find the stars in a session's lights and report what the mount did to
+    /// them: how wide they are across the trail, how long the trail is, and
+    /// whether it points the same way in every frame.
+    Stars(StarsArgs),
 
     /// Decode frames and report what the pixels say: where each colour sits
     /// between black and white, how much is clipped, and how evenly the frame
@@ -113,6 +120,10 @@ fn main() -> Result<()> {
                 .subcommand_matches("calibrate")
                 .expect("the calibrate subcommand was matched");
             calibrate_command::run(&host, args, sub)
+        }
+        Command::Stars(args) => {
+            let sub = matches.subcommand_matches("stars").expect("the stars subcommand was matched");
+            stars_command::run(&host, args, sub)
         }
         Command::Measure { files, map } => measure_frames(&host, files, *map),
         Command::Info { files, decode } => describe_frames(&host, files, *decode),

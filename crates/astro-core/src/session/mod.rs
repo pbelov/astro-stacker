@@ -17,6 +17,7 @@ use astro_plugin_abi::safe::FrameInfo;
 
 pub mod compat;
 pub mod kind;
+pub mod mosaic;
 pub mod scan;
 pub mod sets;
 pub mod stats;
@@ -25,6 +26,7 @@ pub use compat::{
     GeometryKey, Incompatibility, Mismatch, Pairing, Property, Rect, Severity, Tolerances,
 };
 pub use kind::{Basis, FrameKind, FrameRole, Inference};
+pub use mosaic::{Area, Mosaic, active_area};
 pub use scan::{Progress, RoleRule, ScanOptions, ScanReport, scan, scan_with_progress};
 pub use stats::{ColourStats, FrameStats, Uniformity, illumination_map, measure};
 pub use sets::{
