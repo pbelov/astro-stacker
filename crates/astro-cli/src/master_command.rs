@@ -1,12 +1,12 @@
 //! The `master` subcommand: turn a session's calibration sets into masters.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use astro_core::calibrate::{CombineOptions, Master, build, fits};
-use astro_core::session::{FrameKind, FrameSet, Session, scan};
 use astro_core::PluginHost;
+use astro_core::calibrate::{CombineOptions, Master, build, fits};
+use astro_core::session::{FrameKind, FrameSet, Partition, Session, StackPlan, scan};
 use clap::{ArgMatches, Args};
 
 use crate::format;
@@ -28,6 +28,18 @@ pub struct MasterArgs {
     pub resident_mb: Option<u64>,
 }
 
+/// The three masters a light needs, each `None` where nothing was matched.
+///
+/// `None` rather than a master of ones, because applying nothing and applying
+/// an identity are indistinguishable in the pixels and must not be
+/// indistinguishable in the report.
+#[derive(Debug, Default)]
+pub struct MasterSet {
+    pub bias: Option<Master>,
+    pub dark: Option<Master>,
+    pub flat: Option<Master>,
+}
+
 pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result<()> {
     let (options, tolerances) = options_from(&args.scan, matches)?;
     let report = scan(host, &options)?;
@@ -44,6 +56,39 @@ pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result
         combine.resident_bytes = mb.saturating_mul(1 << 20);
     }
 
+    let masters = build_masters(
+        host,
+        &report.session,
+        &partition,
+        plan,
+        &combine,
+        &args.out,
+        true,
+        args.scan.quiet,
+    )?;
+
+    if masters.bias.is_none() && masters.dark.is_none() && masters.flat.is_none() {
+        bail!("no calibration set was matched to the lights, so no master was built");
+    }
+    Ok(())
+}
+
+/// Builds every master the plan matched, optionally writing each one out.
+///
+/// Shared with `calibrate` rather than duplicated: two commands that disagreed
+/// about how a master is combined would produce two different images from one
+/// session.
+#[allow(clippy::too_many_arguments)]
+pub fn build_masters(
+    host: &PluginHost,
+    session: &Session,
+    partition: &Partition,
+    plan: &StackPlan,
+    options: &CombineOptions,
+    out: &Path,
+    write: bool,
+    quiet: bool,
+) -> Result<MasterSet> {
     // The bias, then the dark, then the flat: the order they are applied in,
     // which is also the order the user will want to read them in.
     let roles = [
@@ -52,21 +97,21 @@ pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result
         (FrameKind::Flat, plan.flat.as_ref()),
     ];
 
-    let mut built = 0usize;
+    let mut built = MasterSet::default();
     for (kind, matched) in roles {
         let Some(matched) = matched else {
             println!("{:<10} nothing matched, nothing built", kind.name());
             continue;
         };
         let Some(set) = partition.set(matched.set) else { continue };
-        build_one(host, &report.session, set, &combine, &args.out, args.scan.quiet)?;
-        built += 1;
+        let master = build_one(host, session, set, options, out, write, quiet)?;
+        match kind {
+            FrameKind::Bias => built.bias = Some(master),
+            FrameKind::Dark => built.dark = Some(master),
+            _ => built.flat = Some(master),
+        }
     }
-
-    if built == 0 {
-        bail!("no calibration set was matched to the lights, so no master was built");
-    }
-    Ok(())
+    Ok(built)
 }
 
 fn build_one(
@@ -74,9 +119,10 @@ fn build_one(
     session: &Session,
     set: &FrameSet,
     options: &CombineOptions,
-    out: &std::path::Path,
+    out: &Path,
+    write: bool,
     quiet: bool,
-) -> Result<()> {
+) -> Result<Master> {
     let kind = set.kind();
     let active = set.members.iter().filter(|id| session[**id].is_active()).count();
     println!();
@@ -97,18 +143,19 @@ fn build_one(
 
     print_master(&master, started.elapsed().as_secs_f64());
 
-    let path = out.join(format!("{}.fits", master.file_stem()));
-    fits::write(
-        &path,
-        &master.pixels,
-        master.layout.width as usize,
-        master.layout.height as usize,
-        &master.header(),
-    )
-    .with_context(|| format!("writing {}", path.display()))?;
-    println!("  wrote      {}", path.display());
-
-    Ok(())
+    if write {
+        let path = out.join(format!("{}.fits", master.file_stem()));
+        fits::write(
+            &path,
+            &master.pixels,
+            master.layout.width as usize,
+            master.layout.height as usize,
+            &master.header(),
+        )
+        .with_context(|| format!("writing {}", path.display()))?;
+        println!("  wrote      {}", path.display());
+    }
+    Ok(master)
 }
 
 fn print_master(master: &Master, seconds: f64) {

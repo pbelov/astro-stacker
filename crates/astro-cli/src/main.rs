@@ -6,6 +6,7 @@
 
 mod format;
 mod report;
+mod calibrate_command;
 mod master_command;
 mod scan_command;
 
@@ -16,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use astro_core::session::{ColourStats, FrameStats, illumination_map, measure};
 use astro_core::{OpenFrame, PluginHost, Samples, cfa_pattern_name, default_plugin_dirs};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
+use calibrate_command::CalibrateArgs;
 use master_command::MasterArgs;
 use scan_command::ScanArgs;
 
@@ -45,6 +47,9 @@ enum Command {
 
     /// Combine a session's calibration frames into masters and write them.
     Master(MasterArgs),
+
+    /// Apply a session's masters to its lights and write the result.
+    Calibrate(CalibrateArgs),
 
     /// Decode frames and report what the pixels say: where each colour sits
     /// between black and white, how much is clipped, and how evenly the frame
@@ -101,6 +106,12 @@ fn main() -> Result<()> {
                 .subcommand_matches("master")
                 .expect("the master subcommand was matched");
             master_command::run(&host, args, sub)
+        }
+        Command::Calibrate(args) => {
+            let sub = matches
+                .subcommand_matches("calibrate")
+                .expect("the calibrate subcommand was matched");
+            calibrate_command::run(&host, args, sub)
         }
         Command::Measure { files, map } => measure_frames(&host, files, *map),
         Command::Info { files, decode } => describe_frames(&host, files, *decode),

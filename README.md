@@ -5,7 +5,7 @@ frames into one deep image. In the spirit of DeepSkyStacker, but faster, and
 built so that every image format is a plugin rather than a branch in a switch
 statement.
 
-**Status: 0.5.0 — it calibrates.** Point it at a night's folder and it groups
+**Status: 0.6.0 — it calibrates.** Point it at a night's folder and it groups
 the frames into stackable sets, matches darks, flats and biases to the lights,
 names everything that does not fit, and combines the calibration frames into
 master frames written as 32-bit FITS. It does not register or integrate the
@@ -65,6 +65,15 @@ Combine the calibration frames into masters:
 ```bash
 cargo run --release --bin astro-stacker -- master --lights D:/astro/M31/lights --darks D:/astro/M31/darks --flats D:/astro/M31/flats --biases D:/astro/library/bias -o D:/astro/M31/masters
 ```
+
+Apply them to a light and look at the result:
+
+```bash
+cargo run --release --bin astro-stacker -- calibrate --lights D:/astro/M31/lights --darks D:/astro/M31/darks --flats D:/astro/M31/flats --biases D:/astro/library/bias --skip 100 -o D:/astro/M31/calibrated
+```
+
+One light by default, because a calibrated frame is 76 MB and a session is many
+gigabytes; integration will calibrate on the way past and write none of them.
 
 Masters are written as 32-bit float FITS in ADU, in sensor readout order, with
 the Bayer pattern and what went into them in the header. Below six frames a set
