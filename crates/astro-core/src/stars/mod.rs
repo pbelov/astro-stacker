@@ -38,8 +38,17 @@ pub struct Star {
     pub y: f64,
     /// Sum of the signal above sky over the footprint.
     pub flux: f64,
-    /// The brightest single sample above sky, for ranking without the footprint.
-    pub peak: f32,
+    /// How far above the noise this source was detected, in sigma, on the
+    /// filtered plane.
+    ///
+    /// This and not `flux` is what ranks stars. `flux` is summed over a
+    /// threshold footprint, so it grows with the footprint's area as much as
+    /// with the source's brightness, and the largest footprints belong to merged
+    /// pairs and to whatever the sky estimate left behind. Ranking by it puts
+    /// the least star-like sources at the top of the list, and since matching
+    /// takes the top of the list, two frames of the same field then propose
+    /// different objects to each other and register against nothing.
+    pub significance: f32,
     pub moments: Moments,
     /// How many photosites the footprint held, which is the honest measure of
     /// how much the moments rest on.
@@ -49,7 +58,7 @@ pub struct Star {
 impl Star {
     /// For tests and for callers that already have the shape.
     pub fn at(x: f64, y: f64, moments: Moments) -> Self {
-        Self { x, y, flux: f64::NAN, peak: f32::NAN, moments, footprint: 0 }
+        Self { x, y, flux: f64::NAN, significance: f32::NAN, moments, footprint: 0 }
     }
 
     pub fn orientation(&self) -> Option<(f64, f64)> {
@@ -149,7 +158,7 @@ pub fn detect(
     }
 
     let filtered = matched_filter(&whitened, width, layout.height as usize, options.filter_sigma);
-    let found = extract(&whitened, &filtered, pixels, raw, layout, &mosaic, &sky, options);
+    let found = extract(&filtered, pixels, raw, layout, &mosaic, &sky, options);
 
     let (sky_level, noise) = sky_summary(&sky, &mosaic);
     let shape = FrameShape::of(&found.stars, sky_level, noise);
@@ -215,7 +224,6 @@ struct Found {
 
 #[allow(clippy::too_many_arguments)]
 fn extract(
-    whitened: &[f32],
     filtered: &[f32],
     pixels: &[f32],
     raw: &[u16],
@@ -323,15 +331,19 @@ fn extract(
                 continue;
             }
 
-            if let Some(star) = measure_star(&footprint, pixels, layout, mosaic, sky, whitened) {
+            // `peak` is the filtered value at the local maximum that started
+            // this footprint, which is the source's detection significance in
+            // sigma - the plane's noise is one by construction.
+            if let Some(star) = measure_star(&footprint, pixels, layout, mosaic, sky, peak) {
                 stars.push(star);
             }
         }
     }
 
-    // Brightest first, then capped: what comes after this wants hundreds of the
-    // best rather than everything.
-    stars.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+    // Most confidently detected first, then capped: what comes after this wants
+    // hundreds of the best rather than everything, and "best" has to mean most
+    // certainly a star rather than largest blob.
+    stars.sort_by(|a, b| b.significance.total_cmp(&a.significance));
     stars.truncate(options.max_stars);
     Found { stars, saturated, oversized }
 }
@@ -380,11 +392,10 @@ fn measure_star(
     layout: &ImageLayout,
     mosaic: &Mosaic,
     sky: &Sky,
-    whitened: &[f32],
+    significance: f32,
 ) -> Option<Star> {
     let width = layout.width as usize;
     let mut samples: Vec<(f64, f64, f64)> = Vec::with_capacity(footprint.len());
-    let mut peak = f32::NEG_INFINITY;
     let mut flux = 0f64;
 
     for &index in footprint {
@@ -398,7 +409,6 @@ fn measure_star(
         // is what biases the widths.
         flux += value;
         samples.push((x as f64, y as f64, value));
-        peak = peak.max(whitened[index]);
     }
 
     // A starting point for the window, not a reported measurement: the negative
@@ -431,10 +441,17 @@ fn measure_star(
         // registration wants positions. `Moments::NONE` keeps this source out of
         // the frame's shape statistics rather than voting a made-up width into
         // them.
-        return Some(Star { x: cx, y: cy, flux, peak, moments: Moments::NONE, footprint: footprint.len() });
+        return Some(Star {
+            x: cx,
+            y: cy,
+            flux,
+            significance,
+            moments: Moments::NONE,
+            footprint: footprint.len(),
+        });
     };
 
-    Some(Star { x, y, flux, peak, moments, footprint: footprint.len() })
+    Some(Star { x, y, flux, significance, moments, footprint: footprint.len() })
 }
 
 /// Iterates a Gaussian window to the source's own shape and returns both the

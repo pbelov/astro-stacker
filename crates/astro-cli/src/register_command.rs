@@ -1,0 +1,470 @@
+//! The `register` subcommand: put every light of a run onto one set of
+//! coordinates and report how far each had to move.
+//!
+//! Like `stars`, this measures and does not filter. What it produces is the
+//! transform per frame and the drift over the night, which is the thing that
+//! says whether the mount was tracking, whether the field rotated, and which
+//! frames are somewhere else entirely.
+
+use std::collections::VecDeque;
+use std::time::Instant;
+
+use anyhow::{Context, Result, bail};
+use astro_core::calibrate::apply;
+use astro_core::register::{Fitted, MatchOptions, Registration, Transform, refine, register};
+use astro_core::session::{FrameId, Session};
+use astro_core::stars::{DetectOptions, detect};
+use astro_core::{PluginHost, Samples};
+use astro_core::stars::Star;
+use clap::{ArgMatches, Args};
+
+use crate::format;
+use crate::master_command::{MasterSet, build_masters};
+use crate::scan_command::{ScanArgs, options_from};
+
+#[derive(Args, Debug)]
+pub struct RegisterArgs {
+    #[command(flatten)]
+    pub scan: ScanArgs,
+
+    /// How many lights to register. All of them by default.
+    #[arg(long, value_name = "N")]
+    pub frames: Option<usize>,
+
+    /// Skip this many lights first.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub skip: usize,
+
+    /// Register every Nth light rather than every one.
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    pub step: usize,
+
+    /// Register against this frame rather than one chosen from the middle of the
+    /// run. Give the file stem, as printed.
+    #[arg(long, value_name = "NAME")]
+    pub reference: Option<String>,
+
+    /// Detect on the raw frame instead of calibrating first.
+    #[arg(long)]
+    pub raw: bool,
+
+    /// How many times the noise a peak must stand above the sky to count.
+    #[arg(long, value_name = "SIGMA", default_value_t = 5.0)]
+    pub sigma: f32,
+
+    /// How many of the brightest stars to match with. Generous on purpose: the
+    /// top of a brightness ranking is the least stable part of it, because
+    /// which stars saturate moves with the trailing.
+    #[arg(long, value_name = "N", default_value_t = 1000)]
+    pub stars: usize,
+
+    /// How far along the run to look for a frame to chain through. Larger
+    /// steps over more ruined frames and costs more matching.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    pub span: usize,
+
+    /// Print one line per frame, not only the summary.
+    #[arg(long)]
+    pub each: bool,
+}
+
+struct Frame {
+    name: String,
+    stars: Vec<Star>,
+    registration: Option<Registration>,
+    /// How the frame was seeded, for the report: a run where most frames needed
+    /// the chain is a run that drifted, and that is worth knowing.
+    seeded: Seed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seed {
+    /// Matched against the reference directly, by voting for the most popular
+    /// offset. What a frame near the reference can afford.
+    Vote,
+    /// Seeded by carrying the answer along the run from neighbour to neighbour,
+    /// then fitted against the reference directly.
+    Chain,
+    None,
+}
+
+pub fn run(host: &PluginHost, args: &RegisterArgs, matches: &ArgMatches) -> Result<()> {
+    if args.step == 0 {
+        bail!("--step 0 would register no frames");
+    }
+    let (options, tolerances) = options_from(&args.scan, matches)?;
+    let report = astro_core::session::scan(host, &options)?;
+    let partition = report.session.partition(&tolerances);
+
+    let chosen = crate::plan::choose(&report.session, &partition, args.scan.set)?;
+    chosen.announce(&report.session);
+    let (plan, lights) = (chosen.plan, chosen.lights);
+
+    let masters = if args.raw {
+        MasterSet::default()
+    } else {
+        build_masters(
+            host,
+            &report.session,
+            &partition,
+            plan,
+            &Default::default(),
+            &std::env::temp_dir(),
+            false,
+            args.scan.quiet,
+        )?
+    };
+
+    let selected: Vec<FrameId> = lights
+        .members
+        .iter()
+        .copied()
+        .filter(|id| report.session[*id].is_active())
+        .skip(args.skip)
+        .step_by(args.step)
+        .take(args.frames.unwrap_or(usize::MAX))
+        .collect();
+    if selected.len() < 2 {
+        bail!("registration needs at least two lights, and this run offers {}", selected.len());
+    }
+
+    let detect_options = DetectOptions { detect_sigma: args.sigma, ..Default::default() };
+    println!("\nfinding stars in {}", format::plural(selected.len(), "light"));
+    let started = Instant::now();
+    let mut frames: Vec<Frame> = Vec::with_capacity(selected.len());
+    for id in selected {
+        match stars_of(host, &report.session, id, &masters, &detect_options) {
+            Ok(frame) => frames.push(frame),
+            Err(error) => eprintln!("warning: {error:#}"),
+        }
+    }
+    if frames.len() < 2 {
+        bail!("fewer than two frames yielded stars, so there is nothing to register against");
+    }
+    println!(
+        "  found stars in {} in {:.1}s",
+        format::plural(frames.len(), "frame"),
+        started.elapsed().as_secs_f64()
+    );
+
+    let reference = choose_reference(&frames, args.reference.as_deref())?;
+    println!(
+        "  reference  {} ({} stars, frame {} of {})",
+        frames[reference].name,
+        frames[reference].stars.len(),
+        reference + 1,
+        frames.len()
+    );
+
+    let match_options = MatchOptions { brightest: args.stars, ..Default::default() };
+    let started = Instant::now();
+    let (seeds, links) = chain_seeds(&frames, reference, args.span, &match_options);
+    let unreached = seeds.iter().filter(|seed| seed.is_none()).count();
+
+    // Split so the reference can be borrowed while the rest are written.
+    let anchor: Vec<Star> = frames[reference].stars.clone();
+    for (index, frame) in frames.iter_mut().enumerate() {
+        if index == reference {
+            frame.registration = Some(Registration {
+                transform: Transform::IDENTITY,
+                fitted: Fitted::Similarity,
+                matched: frame.stars.len(),
+                residual: 0.0,
+            });
+            frame.seeded = Seed::Vote;
+            continue;
+        }
+        // The chained guess first, since it is the one that works at a distance,
+        // and the vote as the fallback for a frame the chain could not reach.
+        if let Some(seed) = seeds[index]
+            && let Some(found) = refine(&anchor, &frame.stars, seed, &match_options)
+        {
+            frame.registration = Some(found);
+            frame.seeded = Seed::Chain;
+            continue;
+        }
+        frame.registration = register(&anchor, &frame.stars, &match_options);
+        frame.seeded = if frame.registration.is_some() { Seed::Vote } else { Seed::None };
+    }
+    println!(
+        "  registered in {:.1}s, the chain of {links} links reaching {} of {}",
+        started.elapsed().as_secs_f64(),
+        frames.len() - unreached,
+        frames.len()
+    );
+
+    summarise(&frames, reference, args.each);
+    Ok(())
+}
+
+/// A transform for every frame, built by registering each against a nearby
+/// frame and carrying the result back to the reference.
+///
+/// Consecutive subframes share nearly all their sky, so the offset vote finds
+/// them easily; the ends of a drifting night do not, which is why this exists.
+/// On this project's reference session the field walks two thousand photosites,
+/// and a frame a hundred exposures from the reference has too little in common
+/// with it for the most popular offset to mean anything.
+///
+/// What it produces is only a seed. Every frame is then fitted against the
+/// reference directly, so the error of a long chain of links never reaches the
+/// answer — only its guess.
+///
+/// It spreads outward from the reference rather than walking the run in order,
+/// and it will step over a frame as well as to it. A single ruined frame — cloud,
+/// a bump, a passing car — would otherwise cut the run in half and lose
+/// everything past it, which is the failure that a chain of strict neighbours
+/// actually shows on real data. Reaching each frame in the fewest hops also
+/// keeps the guess as good as it can be.
+fn chain_seeds(
+    frames: &[Frame],
+    reference: usize,
+    span: usize,
+    options: &MatchOptions,
+) -> (Vec<Option<Transform>>, usize) {
+    let mut seeds: Vec<Option<Transform>> = vec![None; frames.len()];
+    seeds[reference] = Some(Transform::IDENTITY);
+
+    let mut queue = VecDeque::from([reference]);
+    let mut links = 0usize;
+    while let Some(here) = queue.pop_front() {
+        let onward = seeds[here].expect("a frame is queued only once it has a seed");
+        let first = here.saturating_sub(span);
+        for there in first..(here + span + 1).min(frames.len()) {
+            if there == here || seeds[there].is_some() {
+                continue;
+            }
+            // The transform that maps `there` onto `here`, then `here` onto the
+            // reference. Composed this way round, no inverse is ever needed.
+            let Some(link) = register(&frames[here].stars, &frames[there].stars, options) else {
+                continue;
+            };
+            links += 1;
+            seeds[there] = Some(link.transform.then(&onward));
+            queue.push_back(there);
+        }
+    }
+    (seeds, links)
+}
+
+fn stars_of(
+    host: &PluginHost,
+    session: &Session,
+    id: FrameId,
+    masters: &MasterSet,
+    options: &DetectOptions,
+) -> Result<Frame> {
+    let path = session.path(id).context("a frame with no path")?;
+    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+
+    let frame = host.open(&path).with_context(|| format!("opening {}", path.display()))?;
+    let Samples::U16(raw) = frame.decode().with_context(|| format!("decoding {}", path.display()))?
+    else {
+        bail!("{name}: floating-point sensor data is not registered yet");
+    };
+    let pixels = if masters.dark.is_some() || masters.flat.is_some() {
+        apply(&raw, masters.dark.as_ref(), masters.flat.as_ref(), frame.layout()).0
+    } else {
+        raw.iter().map(|value| f32::from(*value)).collect()
+    };
+    let detection = detect(&pixels, &raw, frame.layout(), options)
+        .with_context(|| format!("{name}: no measurable sky to threshold against"))?;
+
+    Ok(Frame { name, stars: detection.stars, registration: None, seeded: Seed::None })
+}
+
+/// The frame everything else is measured against.
+///
+/// From the middle of the run unless the user names one, because drift
+/// accumulates and the middle is the frame with the least of it between itself
+/// and the ends. Among the middle third, the one with the most stars: a
+/// reference thin on stars limits every match made against it.
+fn choose_reference(frames: &[Frame], named: Option<&str>) -> Result<usize> {
+    if let Some(wanted) = named {
+        return frames
+            .iter()
+            .position(|frame| frame.name == wanted)
+            .with_context(|| format!("no light called {wanted} was measured"));
+    }
+    let third = frames.len() / 3;
+    let window = third..frames.len().saturating_sub(third).max(third + 1);
+    window
+        .clone()
+        .max_by_key(|index| frames[*index].stars.len())
+        .with_context(|| format!("the run has no middle to choose from: {window:?}"))
+}
+
+fn summarise(frames: &[Frame], reference: usize, each: bool) {
+    // The frame centre, from the reference's own stars: registration reports how
+    // far a point moved, and the point that means anything is the middle of the
+    // frame rather than the corner the coordinates start at.
+    let (cx, cy) = centre_of(&frames[reference].stars);
+
+    if each {
+        println!();
+        for frame in frames {
+            match &frame.registration {
+                Some(found) => {
+                    let (dx, dy) = found.transform.displacement_at(cx, cy);
+                    // A rotation that was never fitted is not a rotation of
+                    // zero, and printing it as one would report a run as
+                    // steadier than anything measured it to be.
+                    let (turn, scale) = match found.fitted {
+                        Fitted::Similarity => (
+                            format!("{:>7.3}'", found.transform.rotation_degrees() * 60.0),
+                            format!("{:>+8.1}", (found.transform.scale() - 1.0) * 1e6),
+                        ),
+                        Fitted::Shift => ("      --".to_owned(), "      --".to_owned()),
+                    };
+                    println!(
+                        "  {:<24} dx {:>8.2}  dy {:>8.2}  turn {turn}  scale {scale} ppm  \
+                         {:>4} pairs at {:.2} px",
+                        frame.name, dx, dy, found.matched, found.residual
+                    );
+                }
+                None => println!("  {:<24} did not register", frame.name),
+            }
+        }
+    }
+
+    let registered: Vec<(&Frame, &Registration)> = frames
+        .iter()
+        .filter_map(|frame| frame.registration.as_ref().map(|found| (frame, found)))
+        .collect();
+    let failed: Vec<&Frame> = frames.iter().filter(|frame| frame.registration.is_none()).collect();
+
+    println!();
+    if !failed.is_empty() {
+        // A frame that would not register is not a frame to stack, and it is
+        // the one the user most needs named.
+        println!(
+            "{} did not register against the reference, which means cloud, a snag, or a \
+             different target - not a small error:",
+            format::plural(failed.len(), "frame")
+        );
+        for frame in &failed {
+            println!("  {:<24} {} stars found", frame.name, frame.stars.len());
+        }
+        println!();
+    }
+    if registered.is_empty() {
+        println!("nothing registered, so there is no drift to report");
+        return;
+    }
+
+    let mut shifts: Vec<f64> = Vec::new();
+    let (mut min_x, mut max_x, mut min_y, mut max_y) =
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    let mut turns: Vec<f64> = Vec::new();
+    let mut scales: Vec<f64> = Vec::new();
+    let mut residuals: Vec<f64> = Vec::new();
+    let mut pairs: Vec<usize> = Vec::new();
+    for (_, found) in &registered {
+        let (dx, dy) = found.transform.displacement_at(cx, cy);
+        shifts.push((dx * dx + dy * dy).sqrt());
+        min_x = min_x.min(dx);
+        max_x = max_x.max(dx);
+        min_y = min_y.min(dy);
+        max_y = max_y.max(dy);
+        // Only a frame that actually bought the four parameters may speak
+        // about rotation and scale.
+        if found.fitted == Fitted::Similarity {
+            turns.push(found.transform.rotation_degrees() * 60.0);
+            scales.push((found.transform.scale() - 1.0) * 1e6);
+        }
+        residuals.push(found.residual);
+        pairs.push(found.matched);
+    }
+    let median = |values: &mut Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    };
+
+    println!("the run as a whole");
+    println!(
+        "  registered {} of {}, {} pairs at the median",
+        registered.len(),
+        frames.len(),
+        {
+            pairs.sort_unstable();
+            pairs[pairs.len() / 2]
+        }
+    );
+    println!(
+        "  drift      {:.0} px across the run: x from {min_x:.0} to {max_x:.0}, y from {min_y:.0} to {max_y:.0}",
+        ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt()
+    );
+    println!("  shift      {:.1} px from the reference at the median", median(&mut shifts));
+    if turns.is_empty() {
+        println!("  rotation   not measured: no frame matched enough stars to afford an angle");
+    } else {
+        let (turn_low, turn_high) = extremes(&turns);
+        println!(
+            "  rotation   {:.3}' at the median, {turn_low:.3}' to {turn_high:.3}' over the {} that bought one",
+            median(&mut turns),
+            turns.len()
+        );
+        let (scale_low, scale_high) = extremes(&scales);
+        println!(
+            "  scale      {:+.0} ppm at the median, {scale_low:+.0} to {scale_high:+.0} over the same",
+            median(&mut scales)
+        );
+    }
+    // The residual is the number that says whether four parameters were enough.
+    // A residual near the centroid error means the model fits; one several times
+    // larger means the field is doing something a similarity cannot describe.
+    let chained = frames.iter().filter(|frame| frame.seeded == Seed::Chain).count();
+    if chained > 0 {
+        println!(
+            "  {chained} of them were out of the reference's reach on their own and were seeded \
+             by the chain of neighbours"
+        );
+    }
+    let shift_only = registered.iter().filter(|(_, found)| found.fitted == Fitted::Shift).count();
+    if shift_only > 0 {
+        println!(
+            "  {shift_only} of them matched too few stars for an angle and were fitted as a shift alone"
+        );
+    }
+    println!(
+        "  residual   {:.2} px at the median, {:.2} at the worst frame",
+        median(&mut residuals),
+        residuals.last().copied().unwrap_or(f64::NAN)
+    );
+
+    // What the field costs, put as a choice rather than a verdict. A run that
+    // was framed and refocused before it settled has a few frames a long way
+    // from the reference, and keeping them costs most of the picture. Which
+    // trade to make is the owner's.
+    let width = cx * 2.0;
+    println!("\nwhat keeping the far frames costs");
+    for fraction in [1.0f64, 0.9, 0.75, 0.5] {
+        let limit = shifts[((shifts.len() - 1) as f64 * fraction) as usize];
+        let kept = shifts.iter().filter(|shift| **shift <= limit).count();
+        println!(
+            "  within {limit:>7.0} px  keeps {kept} of {} ({:.0}%), leaving {:.0}% of the frame",
+            shifts.len(),
+            kept as f64 / shifts.len() as f64 * 100.0,
+            (1.0 - limit / width).max(0.0) * 100.0
+        );
+    }
+}
+
+/// The middle of the star field, which stands in for the middle of the frame
+/// without needing the layout here.
+fn centre_of(stars: &[Star]) -> (f64, f64) {
+    if stars.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut xs: Vec<f64> = stars.iter().map(|star| star.x).collect();
+    let mut ys: Vec<f64> = stars.iter().map(|star| star.y).collect();
+    xs.sort_by(f64::total_cmp);
+    ys.sort_by(f64::total_cmp);
+    ((xs[0] + xs[xs.len() - 1]) / 2.0, (ys[0] + ys[ys.len() - 1]) / 2.0)
+}
+
+fn extremes(values: &[f64]) -> (f64, f64) {
+    let low = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    (low, high)
+}

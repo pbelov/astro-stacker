@@ -11,6 +11,7 @@ pub mod error;
 pub mod frame;
 pub mod plugin;
 pub mod session;
+pub mod register;
 pub mod stars;
 
 pub use error::{Error, Result};

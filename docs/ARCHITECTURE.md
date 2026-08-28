@@ -222,6 +222,46 @@ of the direction is a separate number: the length of the mean of
 `(cos 2t, sin 2t)`. That separation is what distinguishes a tracking rate error,
 which points one way in every frame, from wind, which does not.
 
+### Registration is four parameters, seeded by a vote, chained through neighbours
+
+Between two subframes the field can shift, turn, and change plate scale. It
+cannot shear and it cannot change aspect: those belong to the sensor and the
+optics, which are the same in both frames. An affine fit has two spare
+parameters, and spare parameters do not sit idle — they absorb what the star
+matching got wrong and hide it in a lower residual. So the fit is a similarity,
+solved in closed form as one complex division.
+
+Which star is which is settled by voting for the most popular offset among all
+pairs, not by matching triangles. Triangles solve a harder problem than the one
+here. The cost is that the vote only works while the frames share most of their
+sky, and over the reference session the field walks 3913 photosites across a
+5512-photosite frame — so a frame a hundred exposures from the reference has
+nothing to vote with.
+
+Hence the chain: each frame is registered against a nearby one and the answer
+carried back to the reference, spreading outward breadth-first over a window of
+three rather than walking the run in order, so that one ruined frame steps aside
+instead of cutting the run in half. The chain only ever produces a *seed* —
+every frame is then fitted against the reference directly, so the error of two
+hundred chained links never reaches the answer.
+
+Three refusals are load-bearing. A vote peak that does not stand a factor of
+three above the best unrelated offset is not a match: two unrelated fields of a
+thousand stars always agree by accident a few dozen times. A fit whose pairs
+disagree by more than three photosites is not describing the same sky. And below
+25 pairs only the shift is fitted, because a dozen stars will happily produce a
+rotation of several arcminutes out of their own centroid noise — `Fitted::Shift`
+records that the angle was not measured, rather than reporting it as zero.
+
+### The star list handed to matching is deliberately deep
+
+The instinct is that a short list of the brightest stars is the reliable part.
+It is the opposite: the brightest stars saturate and are dropped, and *which*
+ones saturate moves with the trailing, which over the reference session runs
+from 0.2 to 16 photosites. Two frames of identical pointing shared 16 of their
+top 300 and 571 of their top 1000. Registration therefore matches on a thousand
+stars, and the run went from 47 frames registered to 225 of 226.
+
 ## Layout
 
 ```
@@ -236,6 +276,7 @@ crates/astro-core         plugin host, frame model, and the session:
     stars/sky.rs            per-colour background and noise on a coarse grid
     stars/shape.rs          moments, trailing, and spin-2 direction arithmetic
     stars/mod.rs            detection, footprints, and windowed measurement
+    register/mod.rs         matching frames onto one set of coordinates
 crates/astro-cli          the astro-stacker binary
 plugins/astro-format-canon  CR2/CR3, via rawler
 ```

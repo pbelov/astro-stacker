@@ -9,6 +9,7 @@ mod report;
 mod calibrate_command;
 mod master_command;
 mod plan;
+mod register_command;
 mod scan_command;
 mod stars_command;
 
@@ -21,6 +22,7 @@ use astro_core::{OpenFrame, PluginHost, Samples, cfa_pattern_name, default_plugi
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
 use calibrate_command::CalibrateArgs;
 use master_command::MasterArgs;
+use register_command::RegisterArgs;
 use scan_command::ScanArgs;
 use stars_command::StarsArgs;
 
@@ -53,6 +55,10 @@ enum Command {
 
     /// Apply a session's masters to its lights and write the result.
     Calibrate(CalibrateArgs),
+
+    /// Put every light of a run onto one set of coordinates and report how
+    /// far each had to move: drift, field rotation, and plate scale.
+    Register(RegisterArgs),
 
     /// Find the stars in a session's lights and report what the mount did to
     /// them: how wide they are across the trail, how long the trail is, and
@@ -120,6 +126,11 @@ fn main() -> Result<()> {
                 .subcommand_matches("calibrate")
                 .expect("the calibrate subcommand was matched");
             calibrate_command::run(&host, args, sub)
+        }
+        Command::Register(args) => {
+            let sub =
+                matches.subcommand_matches("register").expect("the register subcommand was matched");
+            register_command::run(&host, args, sub)
         }
         Command::Stars(args) => {
             let sub = matches.subcommand_matches("stars").expect("the stars subcommand was matched");
