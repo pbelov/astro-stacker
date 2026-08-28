@@ -8,6 +8,7 @@ mod format;
 mod report;
 mod calibrate_command;
 mod master_command;
+mod plan;
 mod scan_command;
 
 use std::path::{Path, PathBuf};

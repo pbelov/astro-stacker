@@ -45,9 +45,8 @@ pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result
     let report = scan(host, &options)?;
     let partition = report.session.partition(&tolerances);
 
-    let Some(plan) = partition.plans.first() else {
-        bail!("no stackable set of lights was formed, so there is nothing to calibrate");
-    };
+    let chosen = crate::plan::choose(&report.session, &partition, args.scan.set)?;
+    chosen.announce(&report.session);
     std::fs::create_dir_all(&args.out)
         .with_context(|| format!("creating {}", args.out.display()))?;
 
@@ -60,7 +59,7 @@ pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result
         host,
         &report.session,
         &partition,
-        plan,
+        chosen.plan,
         &combine,
         &args.out,
         true,

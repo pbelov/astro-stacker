@@ -66,6 +66,11 @@ pub struct ScanArgs {
     #[arg(long, id = "exclude", value_name = "NAME")]
     pub exclude: Vec<String>,
 
+    /// Act on this light set rather than the deepest one. The numbers are
+    /// what `scan` prints.
+    #[arg(long, id = "set", value_name = "N")]
+    pub set: Option<usize>,
+
     /// Do not print progress while reading.
     #[arg(long, short, id = "quiet")]
     pub quiet: bool,

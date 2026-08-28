@@ -47,12 +47,9 @@ pub fn run(host: &PluginHost, args: &CalibrateArgs, matches: &ArgMatches) -> Res
     let report = astro_core::session::scan(host, &options)?;
     let partition = report.session.partition(&tolerances);
 
-    let Some(plan) = partition.plans.first() else {
-        bail!("no stackable set of lights was formed, so there is nothing to calibrate");
-    };
-    let Some(lights) = partition.set(plan.lights) else {
-        bail!("the plan names a light set that is not in the partition");
-    };
+    let chosen = crate::plan::choose(&report.session, &partition, args.scan.set)?;
+    chosen.announce(&report.session);
+    let (plan, lights) = (chosen.plan, chosen.lights);
     std::fs::create_dir_all(&args.out)
         .with_context(|| format!("creating {}", args.out.display()))?;
 
