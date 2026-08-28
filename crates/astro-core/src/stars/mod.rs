@@ -36,7 +36,22 @@ pub use sky::Sky;
 pub struct Star {
     pub x: f64,
     pub y: f64,
-    /// Sum of the signal above sky over the footprint.
+    /// Total flux above sky, in ADU, and independent of how blurred the source
+    /// is.
+    ///
+    /// Twice the sum under the fitted window, which is not an approximation but
+    /// an identity. For a Gaussian source of covariance `C` under a Gaussian
+    /// window of covariance `W`, the weighted sum is
+    /// `F * sqrt(det[(C^-1 + W^-1)^-1] / det C)`; the window fit converges to
+    /// `W = C`, where `(C^-1 + C^-1)^-1 = C/2`, whose determinant is a quarter
+    /// of `det C`, so the sum is exactly `F/2` whatever `C` was.
+    ///
+    /// That independence is the point. The obvious flux — the sum over the
+    /// threshold footprint — is not a property of the star at all: the footprint
+    /// grows with the blur while the wings it fails to reach grow too, so a
+    /// trailed frame reads fainter at unchanged transparency. Anything that
+    /// compares one frame's brightness to another's, which is what a stack must
+    /// do before it combines them, would then read the trailing as cloud.
     pub flux: f64,
     /// How far above the noise this source was detected, in sigma, on the
     /// filtered plane.
@@ -395,8 +410,9 @@ fn measure_star(
     significance: f32,
 ) -> Option<Star> {
     let width = layout.width as usize;
+    // Negatives are kept throughout. They are half of the noise, and leaving
+    // them out is what biases the widths.
     let mut samples: Vec<(f64, f64, f64)> = Vec::with_capacity(footprint.len());
-    let mut flux = 0f64;
 
     for &index in footprint {
         let (x, y) = (index % width, index / width);
@@ -405,9 +421,6 @@ fn measure_star(
         if !value.is_finite() {
             continue;
         }
-        // Negatives are kept. They are half of the noise, and leaving them out
-        // is what biases the widths.
-        flux += value;
         samples.push((x as f64, y as f64, value));
     }
 
@@ -436,32 +449,38 @@ fn measure_star(
     }
     let seed = Moments { m11: s11 / sum, m22: s22 / sum, m12: s12 / sum };
 
-    let Some((x, y, moments)) = window_moments(&samples, cx, cy, seed) else {
+    let Some((x, y, moments, under_window)) = window_moments(&samples, cx, cy, seed) else {
         // The shape could not be fitted, but the position still stands, and
         // registration wants positions. `Moments::NONE` keeps this source out of
         // the frame's shape statistics rather than voting a made-up width into
         // them.
+        // The window fit is what makes the flux blur-independent, so without it
+        // there is no flux worth reporting either. The position still stands,
+        // and registration wants positions.
         return Some(Star {
             x: cx,
             y: cy,
-            flux,
+            flux: f64::NAN,
             significance,
             moments: Moments::NONE,
             footprint: footprint.len(),
         });
     };
 
-    Some(Star { x, y, flux, significance, moments, footprint: footprint.len() })
+    Some(Star { x, y, flux: 2.0 * under_window, significance, moments, footprint: footprint.len() })
 }
 
-/// Iterates a Gaussian window to the source's own shape and returns both the
-/// windowed centroid and the deconvolved covariance.
+/// Iterates a Gaussian window to the source's own shape.
+///
+/// Returns the windowed centroid, the deconvolved covariance, and the sum under
+/// the converged window — which is half the source's total flux, whatever its
+/// shape. See [`Star::flux`].
 fn window_moments(
     samples: &[(f64, f64, f64)],
     mut cx: f64,
     mut cy: f64,
     seed: Moments,
-) -> Option<(f64, f64, Moments)> {
+) -> Option<(f64, f64, Moments, f64)> {
     let mut window = if seed.axes().is_some() {
         Moments {
             m11: seed.m11.max(MIN_WINDOW_VARIANCE),
@@ -474,6 +493,7 @@ fn window_moments(
         Moments { m11: MIN_WINDOW_VARIANCE, m22: MIN_WINDOW_VARIANCE, m12: 0.0 }
     };
 
+    let mut under_window = f64::NAN;
     for _ in 0..WINDOW_ITERATIONS {
         let determinant = window.m11 * window.m22 - window.m12 * window.m12;
         if determinant.is_nan() || determinant <= 0.0 {
@@ -503,6 +523,7 @@ fn window_moments(
         if weight.is_nan() || weight <= 0.0 {
             return None;
         }
+        under_window = weight;
 
         let (ox, oy) = (sx / weight, sy / weight);
         cx += ox;
@@ -528,7 +549,7 @@ fn window_moments(
         }
     }
 
-    Some((cx, cy, window))
+    Some((cx, cy, window, under_window))
 }
 
 /// The median sky and noise over the grid, for the report.
@@ -663,6 +684,44 @@ mod tests {
             star.moments.angle_degrees()
         );
         assert!(found.shape.direction_agreement.is_nan() || found.shape.stars == 1);
+    }
+
+    #[test]
+    fn the_flux_of_one_star_does_not_change_when_it_is_blurred_or_trailed() {
+        // The identity this rests on: under a window fitted to the source, the
+        // sum is half the total flux whatever the source's shape. Without it a
+        // trailed frame reads fainter at unchanged transparency, and a stack
+        // comparing frame brightnesses would take the trailing for cloud and
+        // scale the frame up - brightening exactly the worst frames.
+        //
+        // Same total flux, three shapes: round and tight, round and soft, and
+        // trailed three and a half to one like this session's own frames.
+        let total = 40_000.0f64;
+        let shapes = [(1.0f64, 1.0f64, 0.0f64), (2.0, 2.0, 0.0), (3.5, 1.0, 94.5f64.to_radians())];
+        let mut fluxes = Vec::new();
+        for (sx, sy, angle) in shapes {
+            let amplitude = total / (std::f64::consts::TAU * sx * sy);
+            let (pixels, raw, layout) = frame(160, 160, &[(80.0, 80.0, sx, sy, angle, amplitude)]);
+            let found = detect(&pixels, &raw, &layout, &DetectOptions::default()).unwrap();
+            assert_eq!(found.stars.len(), 1, "one star at {sx}x{sy}");
+            fluxes.push(found.stars[0].flux);
+        }
+
+        let reference = fluxes[0];
+        for (flux, (sx, sy, _)) in fluxes.iter().zip(shapes) {
+            let error = (flux - reference).abs() / reference;
+            assert!(error < 0.10, "at {sx}x{sy} the flux moved by {:.1}%", error * 100.0);
+        }
+    }
+
+    #[test]
+    fn a_star_whose_shape_could_not_be_fitted_reports_no_flux_either
+    () {
+        // The flux is only blur-independent because the window converged. Where
+        // it did not, a number would be a different measurement wearing the same
+        // name.
+        let star = Star::at(1.0, 2.0, Moments::NONE);
+        assert!(star.flux.is_nan());
     }
 
     #[test]
