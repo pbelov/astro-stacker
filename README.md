@@ -48,6 +48,27 @@ nothing. The script therefore runs the staged binary and checks that it lists
 the Canon plugin before it calls the build done. `build.bat quick` skips the
 tests and clippy when you are only iterating.
 
+## The window
+
+There is a desktop shell beside the command line, for looking at a session
+rather than reading it:
+
+```
+cd apps/desktop
+npm install
+npm run tauri dev
+```
+
+Tauri 2 and Svelte 5, the same stack and the same palette as the two projects
+next to it on disk. It reads a session and shows what the core made of it: the
+sets it found, which calibration it matched to the lights and how well, what
+differed, and what it refused and why. The steps past that one are not built
+yet and say so rather than being absent.
+
+Nothing in the shell decides anything. It opens files, calls the core and
+renders the answer; when it needed to know which of four plans was the session,
+that rule moved into the core rather than being written a second time.
+
 ## Trying it
 
 List the format plugins that loaded:

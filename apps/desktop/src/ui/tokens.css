@@ -1,0 +1,88 @@
+/*
+ * The palette, shared by hand with star-trails and video-editing-tool.
+ *
+ * "By hand" is the problem this file is meant to make visible. The three
+ * projects already carry the same fourteen colours in three copies, and they
+ * have already drifted: --err-bg is #1a1220 in one and #1c1220 in another,
+ * which is what a copy-paste looks like a year later. Keeping the tokens in one
+ * file per project, rather than buried in a component's <style>, is the smallest
+ * step that makes lifting them into a shared package a move rather than a
+ * rewrite.
+ *
+ * Dark is the default and not the alternative: this is a tool for looking at
+ * night-sky frames, and a bright window beside a stretched image ruins the
+ * only judgement the user is here to make.
+ */
+
+:root {
+  --bg: #0a0e19;
+  --surface: #0e1422;
+  --raised: #131a2c;
+  --chipbg: #1a2138;
+  --line: #263050;
+  --text: #e7eaf3;
+  --muted: #9aa3bc;
+  --dim: #59627c;
+  --faint: #4a5470;
+  --accent: #e5b961;
+  --accent-contrast: #0a0e19;
+  --err: #e07a6c;
+  --err-bg: #1c1220;
+  --warn: #d9a441;
+  --warn-bg: #1b1710;
+  --ok: #74c39a;
+  --ok-bg: #0f1a16;
+  --photo-bg: #05070f;
+
+  --radius: 10px;
+  --gap: 12px;
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f5f9;
+  --surface: #ffffff;
+  --raised: #f8f9fc;
+  --chipbg: #e3e7f2;
+  --line: #d5dbea;
+  --text: #1c2336;
+  --muted: #59627c;
+  --dim: #8a92a8;
+  --faint: #a6adc2;
+  --accent: #8a6a1f;
+  --accent-contrast: #ffffff;
+  --err: #b0392a;
+  --err-bg: #fdeeec;
+  --warn: #8a6410;
+  --warn-bg: #fdf5e4;
+  --ok: #23784c;
+  --ok-bg: #eaf6f0;
+  --photo-bg: #0b0d14;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100vh;
+}
+
+/* Numbers that are read against each other must line up, so every measurement
+   in this interface is tabular. */
+.num {
+  font-variant-numeric: tabular-nums;
+}

@@ -1,0 +1,38 @@
+[package]
+name = "astro-stacker-desktop"
+description = "Desktop shell for astro-stacker (Tauri 2)"
+version = "0.11.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+authors = ["Pavel Belov <psbelov@gmail.com>"]
+
+# Its own workspace on purpose: Tauri pulls in a large dependency tree, and
+# leaving it out of the root workspace keeps `cargo test` at the top of the
+# project fast and free of it.
+[workspace]
+
+[lib]
+name = "astro_stacker_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+astro-core = { path = "../../../crates/astro-core" }
+astro-plugin-abi = { path = "../../../crates/astro-plugin-abi" }
+
+# The core catches a panicking plugin rather than letting it take the process
+# down, which needs unwinding.
+[profile.release]
+panic = "unwind"
+lto = "thin"
+
+# Decoding a raw frame in a debug build is unusably slow otherwise.
+[profile.dev.package."*"]
+opt-level = 3

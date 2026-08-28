@@ -62,27 +62,28 @@ pub fn choose<'a>(
         return Ok(Chosen { plan, lights, picked: partition.plans.len() > 1, of: partition.plans.len() });
     }
 
-    let mut ranked: Vec<(&StackPlan, &FrameSet)> = partition
-        .plans
-        .iter()
-        .filter_map(|plan| partition.set(plan.lights).map(|lights| (plan, lights)))
-        .collect();
-    ranked.sort_by_key(|(_, lights)| std::cmp::Reverse(active(lights)));
+    // The ranking itself lives in the core, so that the window and the command
+    // line cannot come to different conclusions about which set is the session.
+    let ranked = partition.plans_by_depth(session);
 
-    let Some(&(plan, lights)) = ranked.first() else {
+    let Some(&(plan, depth)) = ranked.first() else {
         bail!("every plan names a light set that is not in the partition");
+    };
+    let Some(lights) = partition.set(plan.lights) else {
+        bail!("the deepest plan names a light set that is not in the partition");
     };
 
     // A tie is not a preference to encode. Two equally deep sets of lights are
-    // two nights, or two targets, and only the user knows which.
-    if let Some((_, runner_up)) = ranked.get(1)
-        && active(runner_up) == active(lights)
+    // two nights, or two targets, and only the user knows which. A window can
+    // show both and let the user point; a command has to ask.
+    if let Some((runner_up, tied)) = ranked.get(1)
+        && *tied == depth
     {
         bail!(
             "sets {} and {} both hold {} — say which with --set",
-            lights.id.index(),
-            runner_up.id.index(),
-            format::plural(active(lights), "light")
+            plan.lights.index(),
+            runner_up.lights.index(),
+            format::plural(depth, "light")
         );
     }
 

@@ -318,6 +318,24 @@ own measured noise, and only where the local gradient is small -- which is where
 a satellite trail spends almost all of its length, and where the PSF differences
 that break the naive scheme do not exist.
 
+### The window carries structure across the bridge, never sentences
+
+A `Mismatch` reaches the interface as its kind and its numbers, not as the
+string the command line prints. The command line says its piece in English; the
+window says the same thing in whatever language the user picked, and one shared
+string would force one of them to be wrong. The English rendering travels
+alongside as a fallback for a finding the interface has no words for yet —
+visibly English on screen, so it reads as a gap rather than as a translation,
+and a test over the reference session fails if a mismatch kind appears that the
+interface cannot name.
+
+Nothing is decided in the shell. It opens files, calls the core and serialises
+the answer. The first time that rule was tested it failed immediately: the shell
+rendered `partition.plans` in order, and set order is arbitrary, so the session
+on screen was a two-frame set left over from framing. The fix was not to sort in
+the shell — the command line already had that rule — but to move the ranking
+into `Partition::plans_by_depth`, where both callers reach it.
+
 ## Layout
 
 ```
@@ -338,6 +356,9 @@ crates/astro-core         plugin host, frame model, and the session:
 crates/astro-cli          the astro-stacker binary
     survey.rs               reading a run once: calibrate, detect, measure
     align.rs                choosing a reference and registering against it
+apps/desktop              the window: Tauri 2 and Svelte 5
+    src-tauri/src/lib.rs    the bridge; holds no decisions of its own
+    src/ui/                 palette and parts shared with the sibling projects
 plugins/astro-format-canon  CR2/CR3, via rawler
 ```
 

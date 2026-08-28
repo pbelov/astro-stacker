@@ -311,6 +311,37 @@ impl Partition {
         self.sets.get(id.index())
     }
 
+    /// Every plan with the number of active lights it would stack, deepest
+    /// first.
+    ///
+    /// Taking the plans in the order they happen to be in was a real bug and
+    /// not a theoretical one. Set order is deterministic but arbitrary, and on
+    /// this project's reference session the first plan is a two-frame set left
+    /// over from framing — whose matched dark is a single one-second frame. A
+    /// command built a master dark out of one frame and said so quietly, while
+    /// its own scan output had already named the 226-frame set.
+    ///
+    /// Active lights rather than exposure or capture order: the set the user
+    /// spent the night on is the one with the frames in it. Ties are left as
+    /// ties, because two equally deep sets are two nights or two targets and
+    /// only the caller knows which — a window can show both, a command has to
+    /// ask.
+    pub fn plans_by_depth(&self, session: &Session) -> Vec<(&StackPlan, usize)> {
+        let mut ranked: Vec<(&StackPlan, usize)> = self
+            .plans
+            .iter()
+            .filter_map(|plan| {
+                self.set(plan.lights).map(|lights| {
+                    let active =
+                        lights.members.iter().filter(|id| session[**id].is_active()).count();
+                    (plan, active)
+                })
+            })
+            .collect();
+        ranked.sort_by_key(|(plan, active)| (std::cmp::Reverse(*active), plan.lights.index()));
+        ranked
+    }
+
     /// Rebinds a set after a re-partition. The only safe way to carry anything
     /// across two calls to [`Session::partition`].
     pub fn set_by_key(&self, key: &SetKey) -> Option<SetId> {

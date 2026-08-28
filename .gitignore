@@ -16,3 +16,9 @@ dist/
 
 # Release staging from build.bat
 /build
+
+# Desktop shell
+/apps/desktop/node_modules
+/apps/desktop/dist
+/apps/desktop/src-tauri/target
+/apps/desktop/src-tauri/gen
