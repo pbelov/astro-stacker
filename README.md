@@ -33,6 +33,21 @@ Requires Rust 1.88 or newer. Nothing else — no CMake, no vcpkg, no C toolchain
 cargo build --release
 ```
 
+For a release you can hand to someone, `build.bat` runs the tests and clippy,
+builds, and stages a portable folder with the binary and its plugins beside a
+zip of the same:
+
+```
+build.bat
+```
+
+The staging step is not packaging for its own sake. The binary reads no frame
+format on its own — every format arrives as a loadable library — so a build that
+forgot the plugins still starts, still prints its help, and silently reads
+nothing. The script therefore runs the staged binary and checks that it lists
+the Canon plugin before it calls the build done. `build.bat quick` skips the
+tests and clippy when you are only iterating.
+
 ## Trying it
 
 List the format plugins that loaded:
