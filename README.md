@@ -34,8 +34,8 @@ cargo build --release
 ```
 
 For a release you can hand to someone, `build.bat` runs the tests and clippy,
-builds, and stages a portable folder with the binary and its plugins beside a
-zip of the same:
+builds, and stages a portable folder with the binary and its plugins into
+`build/`, beside a zip of the same:
 
 ```
 build.bat

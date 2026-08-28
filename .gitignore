@@ -15,5 +15,4 @@ dist/
 /out-*
 
 # Release staging from build.bat
-/astro-stacker_*_x64/
-/astro-stacker_*_x64.zip
+/build

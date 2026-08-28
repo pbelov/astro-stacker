@@ -1,6 +1,6 @@
 @echo off
 rem Ручная сборка релиза astro-stacker: портативная папка и zip рядом с ней.
-rem Готовый архив кладётся в корень рабочей папки рядом с этим файлом.
+rem Всё готовое кладётся в подпапку build.
 rem
 rem Отдельный шаг сборки нужен из-за плагинов: бинарник сам по себе не читает
 rem ни одного формата кадра, форматы приходят подключаемыми библиотеками, и
@@ -32,20 +32,28 @@ if "%VER%"=="" (
   exit /b 1
 )
 
+set "OUT=build"
 set "NAME=astro-stacker_%VER%_x64"
-set "ZIP=%NAME%.zip"
+set "STAGE=%OUT%\%NAME%"
+set "ZIP=%OUT%\%NAME%.zip"
 
 echo.
 echo === Сборка astro-stacker %VER% ===
 echo.
 
-rem Старое убирается заранее: иначе в папке остались бы файлы прошлой версии,
-rem а архив собрался бы поверх них и увёз бы их с собой.
-if exist "%NAME%" rd /s /q "%NAME%"
-if exist "%ZIP%" del /f /q "%ZIP%" >nul 2>&1
+rem Старые сборки убираются по имени, а не сносом всей папки build: туда мог
+rem положить что-то и человек. Убирается заранее, иначе в папке остались бы
+rem файлы прошлой версии, а архив собрался бы поверх них и увёз бы их с собой.
+if not exist "%OUT%" mkdir "%OUT%"
+for /d %%d in ("%OUT%\astro-stacker_*_x64") do rd /s /q "%%~d"
+del /f /q "%OUT%\astro-stacker_*_x64.zip" >nul 2>&1
 if exist "%ZIP%" (
   echo [ОШИБКА] не удалось удалить %ZIP%
   echo          Скорее всего он открыт в другой программе.
+  exit /b 1
+)
+if exist "%STAGE%" (
+  echo [ОШИБКА] не удалось очистить %STAGE%
   exit /b 1
 )
 
@@ -97,25 +105,25 @@ for %%f in ("%EXE%" "%PLUGIN%") do (
 rem Хост ищет плагины в подпапке plugins рядом с бинарником, потом рядом с ним
 rem самим. Кладём в plugins: так видно, что это отдельные библиотеки, а не части
 rem программы.
-mkdir "%NAME%\plugins"
-copy /y "%EXE%" "%NAME%\" >nul
+mkdir "%STAGE%\plugins"
+copy /y "%EXE%" "%STAGE%\" >nul
 if not "%ERRORLEVEL%"=="0" (
   echo [ОШИБКА] не удалось скопировать astro-stacker.exe
   exit /b 1
 )
-copy /y "%PLUGIN%" "%NAME%\plugins\" >nul
+copy /y "%PLUGIN%" "%STAGE%\plugins\" >nul
 if not "%ERRORLEVEL%"=="0" (
   echo [ОШИБКА] не удалось скопировать плагин
   exit /b 1
 )
-if exist "README.md" copy /y "README.md" "%NAME%\" >nul
+if exist "README.md" copy /y "README.md" "%STAGE%\" >nul
 
 rem Настоящая проверка, а не формальность: бинарник без своего плагина
 rem запускается и работает - просто молча не читает ни одного формата кадра.
 rem Такую сборку можно отдать и узнать о поломке только от того, кто её открыл.
 echo.
 echo --- Проверка ---
-"%NAME%\astro-stacker.exe" plugins | findstr /i "canon" >nul
+"%STAGE%\astro-stacker.exe" plugins | findstr /i "canon" >nul
 if not "%ERRORLEVEL%"=="0" (
   echo [ОШИБКА] собранный astro-stacker не видит плагин Canon.
   echo          Значит, папка plugins лежит не там, где её ищет хост.
@@ -124,11 +132,12 @@ if not "%ERRORLEVEL%"=="0" (
 echo   плагин Canon загружается
 
 rem tar есть в Windows 10 и новее и умеет zip. PowerShell - запасной путь.
+rem -C нужен, чтобы внутри архива лежала сама папка, а не build\папка.
 where tar >nul 2>&1
 if "%ERRORLEVEL%"=="0" (
-  tar -a -c -f "%ZIP%" "%NAME%"
+  tar -a -c -f "%ZIP%" -C "%OUT%" "%NAME%"
 ) else (
-  powershell -NoProfile -Command "Compress-Archive -Path '%NAME%' -DestinationPath '%ZIP%' -Force"
+  powershell -NoProfile -Command "Compress-Archive -Path '%STAGE%' -DestinationPath '%ZIP%' -Force"
 )
 if not exist "%ZIP%" (
   echo [ОШИБКА] архив не создался
@@ -139,9 +148,9 @@ echo.
 echo === Готово ===
 for %%f in ("%ZIP%") do (
   set /a KB=%%~zf/1024
-  echo   %%~nxf  ^(!KB! КБ, %%~tf^)
+  echo   %%~f  ^(!KB! КБ, %%~tf^)
 )
-echo   %NAME%\  - распакованная папка, запускается прямо из неё
+echo   %STAGE%\  - распакованная папка, запускается прямо из неё
 echo.
 echo   astro-stacker.exe --help      список команд
 echo   astro-stacker.exe plugins     какие форматы читаются
