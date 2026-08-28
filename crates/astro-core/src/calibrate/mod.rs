@@ -32,6 +32,7 @@
 
 pub mod combine;
 pub mod fits;
+pub mod tiff;
 pub mod pedestal;
 
 use astro_plugin_abi::abi::{CFA_MAX_CELLS, ImageLayout};
