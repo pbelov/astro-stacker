@@ -98,6 +98,12 @@ pub struct Detection {
     /// Sources dropped because their footprint ran past the cap, which is what a
     /// satellite trail or a badly deblended pair looks like.
     pub oversized: usize,
+    /// The background this detection was measured against.
+    ///
+    /// Kept because stacking needs the same background the stars were found
+    /// against, and measuring it twice is both a minute of decoding and a
+    /// chance for the two answers to differ.
+    pub sky: Sky,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,7 +183,13 @@ pub fn detect(
 
     let (sky_level, noise) = sky_summary(&sky, &mosaic);
     let shape = FrameShape::of(&found.stars, sky_level, noise);
-    Some(Detection { stars: found.stars, shape, saturated: found.saturated, oversized: found.oversized })
+    Some(Detection {
+        stars: found.stars,
+        shape,
+        saturated: found.saturated,
+        oversized: found.oversized,
+        sky,
+    })
 }
 
 /// A separable Gaussian, scaled so that unit-noise input gives unit-noise

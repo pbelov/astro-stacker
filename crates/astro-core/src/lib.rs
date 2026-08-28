@@ -11,6 +11,7 @@ pub mod error;
 pub mod frame;
 pub mod plugin;
 pub mod session;
+pub mod integrate;
 pub mod register;
 pub mod stars;
 

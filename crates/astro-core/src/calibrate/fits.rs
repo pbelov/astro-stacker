@@ -93,11 +93,32 @@ pub fn write(
     height: usize,
     header: &Header,
 ) -> std::io::Result<()> {
-    if pixels.len() != width * height {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{} samples for a {width}x{height} image", pixels.len()),
-        ));
+    write_planes(path, &[pixels], width, height, header)
+}
+
+/// Writes one or more planes as a 32-bit float image.
+///
+/// Three planes become a colour cube, `NAXIS3 = 3`, which is how every reader
+/// this project cares about expects RGB: plane after plane, not interleaved.
+/// One plane stays two-dimensional rather than becoming a cube of depth one,
+/// because a reader that meets `NAXIS = 3` will offer the user a colour it does
+/// not have.
+pub fn write_planes(
+    path: &Path,
+    planes: &[&[f32]],
+    width: usize,
+    height: usize,
+    header: &Header,
+) -> std::io::Result<()> {
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+    if planes.is_empty() {
+        return Err(invalid("no planes to write".to_owned()));
+    }
+    if let Some(plane) = planes.iter().find(|plane| plane.len() != width * height) {
+        return Err(invalid(format!(
+            "{} samples for a {width}x{height} plane",
+            plane.len()
+        )));
     }
 
     let file = std::fs::File::create(path)?;
@@ -106,7 +127,7 @@ pub fn write(
     let mut cards = vec![
         Card::logical("SIMPLE", true),
         Card::integer("BITPIX", -32),
-        Card::integer("NAXIS", 2),
+        Card::integer("NAXIS", if planes.len() > 1 { 3 } else { 2 }),
         Card::integer("NAXIS1", width as i64),
         Card::integer("NAXIS2", height as i64),
         Card::real("BZERO", 0.0),
@@ -116,6 +137,9 @@ pub fn write(
         Card::text("ROWORDER", "TOP-DOWN"),
     ];
 
+    if planes.len() > 1 {
+        cards.push(Card::integer("NAXIS3", planes.len() as i64));
+    }
     if !header.image_type.is_empty() {
         cards.push(Card::text("IMAGETYP", &header.image_type));
     }
@@ -153,15 +177,17 @@ pub fn write(
 
     // Big-endian, which is the only byte order FITS has.
     let mut buffer = Vec::with_capacity(1 << 16);
-    for value in pixels {
-        buffer.extend_from_slice(&value.to_be_bytes());
-        if buffer.len() >= (1 << 16) {
-            out.write_all(&buffer)?;
-            buffer.clear();
+    for plane in planes {
+        for value in *plane {
+            buffer.extend_from_slice(&value.to_be_bytes());
+            if buffer.len() >= (1 << 16) {
+                out.write_all(&buffer)?;
+                buffer.clear();
+            }
         }
     }
     out.write_all(&buffer)?;
-    pad_to_block(&mut out, size_of_val(pixels), 0)?;
+    pad_to_block(&mut out, planes.len() * width * height * 4, 0)?;
 
     out.flush()
 }

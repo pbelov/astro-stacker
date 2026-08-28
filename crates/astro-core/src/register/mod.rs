@@ -256,6 +256,29 @@ pub fn refine(
     refine_points(&reference, &frame, seed, options)
 }
 
+/// Which star in `frame` is which star in `reference`, once `transform` is
+/// applied.
+///
+/// Returned as index pairs rather than positions because the caller wants what
+/// the stars carry, not where they are: comparing the flux of the same star in
+/// two frames is how one frame's transparency is measured against another's,
+/// and that is what a stack needs before it may combine them.
+pub fn matches(
+    reference: &[Star],
+    frame: &[Star],
+    transform: &Transform,
+    radius: f64,
+) -> Vec<(usize, usize)> {
+    let reference_points: Vec<(f64, f64)> =
+        reference.iter().map(|star| (star.x, star.y)).collect();
+    let frame_points: Vec<(f64, f64)> = frame.iter().map(|star| (star.x, star.y)).collect();
+    if reference_points.is_empty() || frame_points.is_empty() {
+        return Vec::new();
+    }
+    let index = Grid::build(&reference_points, radius.max(1.0));
+    mutual_indices(&reference_points, &frame_points, transform, &index, radius)
+}
+
 fn refine_points(
     reference: &[(f64, f64)],
     frame: &[(f64, f64)],
@@ -410,6 +433,20 @@ fn mutual_pairs(
     index: &Grid,
     radius: f64,
 ) -> Vec<Pair> {
+    mutual_indices(reference, frame, transform, index, radius)
+        .into_iter()
+        .map(|(f, r)| (frame[f], reference[r]))
+        .collect()
+}
+
+/// The same pairing, as indices into the two lists.
+fn mutual_indices(
+    reference: &[(f64, f64)],
+    frame: &[(f64, f64)],
+    transform: &Transform,
+    index: &Grid,
+    radius: f64,
+) -> Vec<(usize, usize)> {
     // Where each frame star lands under the current transform.
     let projected: Vec<(f64, f64)> =
         frame.iter().map(|&(x, y)| transform.apply(x, y)).collect();
@@ -427,7 +464,7 @@ fn mutual_pairs(
         if let Some((nearest, _)) = back.nearest(&projected, rx, ry, radius)
             && nearest == frame_index
         {
-            pairs.push((frame[frame_index], reference[reference_index]));
+            pairs.push((frame_index, reference_index));
         }
     }
     pairs

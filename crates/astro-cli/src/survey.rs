@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use astro_core::calibrate::apply;
 use astro_core::session::{FrameId, Session};
 use astro_core::stars::{Detection, DetectOptions, detect};
-use astro_core::{PluginHost, Samples};
+use astro_core::{ImageLayout, PluginHost, Samples};
 use clap::{ArgMatches, Args};
 
 use crate::format;
@@ -61,8 +61,17 @@ pub struct SurveyArgs {
 }
 
 /// One light, read and measured.
+///
+/// Deliberately does NOT hold the pixels. A run of 225 frames is 16 GiB of them
+/// and the budget is 8, so stacking decodes a second time; what is kept here is
+/// only what is small and would otherwise have to be measured twice.
 pub struct Surveyed {
     pub name: String,
+    pub path: std::path::PathBuf,
+    pub layout: ImageLayout,
+    pub camera_model: String,
+    pub exposure_seconds: Option<f64>,
+    pub iso: Option<f64>,
     pub detection: Detection,
     pub seconds: f64,
 }
@@ -70,6 +79,9 @@ pub struct Surveyed {
 /// A whole run, read.
 pub struct Survey {
     pub frames: Vec<Surveyed>,
+    /// The masters the lights were calibrated with, so a second pass applies
+    /// exactly the same ones rather than rebuilding them.
+    pub masters: MasterSet,
     /// Frames that were selected but could not be read, with the reason.
     /// Carried rather than only printed to stderr: a command that says "225 of
     /// 226" has to be able to name the missing one in the same report.
@@ -170,7 +182,7 @@ pub fn read(
         bail!("no frame could be read");
     }
 
-    Ok(Survey { frames, failed, seconds: started.elapsed().as_secs_f64() })
+    Ok(Survey { frames, masters, failed, seconds: started.elapsed().as_secs_f64() })
 }
 
 fn read_one(
@@ -203,5 +215,15 @@ fn read_one(
     let detection = detect(&pixels, &raw, frame.layout(), options)
         .with_context(|| format!("{name}: no measurable sky to threshold against"))?;
 
-    Ok(Surveyed { name, detection, seconds: started.elapsed().as_secs_f64() })
+    let record = &session[id];
+    Ok(Surveyed {
+        name,
+        path: path.clone(),
+        layout: *frame.layout(),
+        camera_model: record.info.camera_model.clone(),
+        exposure_seconds: record.info.exposure_seconds,
+        iso: record.info.iso,
+        detection,
+        seconds: started.elapsed().as_secs_f64(),
+    })
 }

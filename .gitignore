@@ -9,3 +9,7 @@ dist/
 # Local test data: raw frames are large and not ours to redistribute
 /testdata
 /samples
+
+# Stack output: hundreds of megabytes per run, and reproducible from the frames
+/out
+/out-*

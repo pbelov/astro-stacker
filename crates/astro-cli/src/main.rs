@@ -4,6 +4,7 @@
 //! which plugin claimed a frame, what it says the frame is, and whether the
 //! pixels actually decode.
 
+mod align;
 mod format;
 mod report;
 mod calibrate_command;
@@ -11,6 +12,7 @@ mod master_command;
 mod plan;
 mod register_command;
 mod scan_command;
+mod stack_command;
 mod survey;
 mod stars_command;
 
@@ -25,6 +27,7 @@ use calibrate_command::CalibrateArgs;
 use master_command::MasterArgs;
 use register_command::RegisterArgs;
 use scan_command::ScanArgs;
+use stack_command::StackArgs;
 use stars_command::StarsArgs;
 
 #[derive(Parser)]
@@ -56,6 +59,10 @@ enum Command {
 
     /// Apply a session's masters to its lights and write the result.
     Calibrate(CalibrateArgs),
+
+    /// Combine a registered run into one image, weighting each frame by its
+    /// quality, and write it as FITS and TIFF.
+    Stack(StackArgs),
 
     /// Put every light of a run onto one set of coordinates and report how
     /// far each had to move: drift, field rotation, and plate scale.
@@ -127,6 +134,10 @@ fn main() -> Result<()> {
                 .subcommand_matches("calibrate")
                 .expect("the calibrate subcommand was matched");
             calibrate_command::run(&host, args, sub)
+        }
+        Command::Stack(args) => {
+            let sub = matches.subcommand_matches("stack").expect("the stack subcommand was matched");
+            stack_command::run(&host, args, sub)
         }
         Command::Register(args) => {
             let sub =

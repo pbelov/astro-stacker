@@ -262,6 +262,62 @@ from 0.2 to 16 photosites. Two frames of identical pointing shared 16 of their
 top 300 and 571 of their top 1000. Registration therefore matches on a thousand
 stars, and the run went from 47 frames registered to 225 of 226.
 
+### Frames are combined by depositing photosites, never by interpolating them
+
+Each photosite goes into the plane of its own colour and nowhere else. The
+temptation is to resample a frame and combine the results, but on an
+undemosaiced frame the neighbours of a red photosite are green, so that kernel
+produces a number that measures nothing. Doing it per colour does not rescue it:
+same-colour samples sit two photosites apart while the stars are 2.07 across, so
+each plane is sampled at about half the Nyquist rate and interpolating it
+interpolates the aliases. What makes depositing work is the drift -- the field
+walks 3913 photosites over the run, so the sub-pixel phases are effectively
+uniform and 225 frames fill every cell of every colour many times over.
+
+Measured on the reference session with a drop of one photosite: the stack's
+cross-trail width is 2.52 photosites against 2.07 in the frames themselves.
+
+### Frames are normalised before they are combined, and the model is affine
+
+Transparency multiplies everything that came through the sky; airglow, moonlight
+and light pollution *add* to it, and the two are unrelated -- thin cirrus dims
+the stars while raising the sky. So a frame enters as `scale * (pixel - sky)`,
+and the scale is measured from stars and never from sky level, or a hazy frame
+would be corrected the wrong way.
+
+The scale then enters the weight as its square, `1/(scale*sigma)^2`, because
+multiplying a frame up multiplies its noise with it. Leaving it out is the quiet
+failure: a hazy frame is brightened, its noise is amplified, and it is weighted
+as though it had been clear -- which can make the result noisier than an
+unweighted mean of the good frames alone. The invariance test exists for that one
+mistake: the stack must not change when a frame is given an arbitrary gain.
+
+### The weight has one knob, and both its ends are exact
+
+For structure larger than the star images, blur conserves surface brightness, so
+a trailed frame carries as much signal per unit area as a sharp one and only its
+noise matters: the optimal weight is `1/(scale*sigma)^2` and the PSF does not
+enter. For point sources the signal is concentrated into the PSF noise area
+`4*pi*sqrt(det C)`, so the optimal weight divides by it. `--sharpness` runs from
+0 to 1 between them. Weighting by FWHM as a matter of course, which is the
+conventional thing to do, silently throws away good extended-structure signal.
+
+### Kappa-sigma rejection does not transfer from calibration frames to lights
+
+Not yet built, and deliberately so. Every dark of a set has the same expectation
+at every pixel, which is what makes a clip around the mean sound. Lights do not:
+the trailing on this session runs from 0.18 to 16.23 photosites, so the same
+star has a 25:1 range of peak brightness across the run, and a 3-sigma clip
+rejects the sharp frames in the trail wings and the trailed frames at the core.
+The per-frame noise also spans 7.8:1, so a clip against one pooled sigma cuts
+the noisy frames at their own 1.5 sigma and throws away up to 65% of legitimate
+samples.
+
+What will be built instead: clipping studentised per sample against each frame's
+own measured noise, and only where the local gradient is small -- which is where
+a satellite trail spends almost all of its length, and where the PSF differences
+that break the naive scheme do not exist.
+
 ## Layout
 
 ```
@@ -277,7 +333,11 @@ crates/astro-core         plugin host, frame model, and the session:
     stars/shape.rs          moments, trailing, and spin-2 direction arithmetic
     stars/mod.rs            detection, footprints, and windowed measurement
     register/mod.rs         matching frames onto one set of coordinates
+    integrate/mod.rs        depositing frames onto one grid
+    calibrate/tiff.rs       16-bit TIFF, for programs that do not read FITS
 crates/astro-cli          the astro-stacker binary
+    survey.rs               reading a run once: calibrate, detect, measure
+    align.rs                choosing a reference and registering against it
 plugins/astro-format-canon  CR2/CR3, via rawler
 ```
 
