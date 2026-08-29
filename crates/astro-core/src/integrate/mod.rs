@@ -120,6 +120,15 @@ pub struct Contribution<'a> {
     pub scale: f64,
     /// How much this frame counts, already including `1/(scale * sigma)^2`.
     pub weight: f64,
+    /// This frame's own sky noise, after `scale` has been applied, in the units
+    /// the deposited values are in.
+    ///
+    /// Carried per frame because rejection is judged against it and not against
+    /// a figure pooled over the run. The frames of one night do not share a
+    /// variance — that is the whole reason they are weighted — so a threshold
+    /// built from the pooled spread cuts the noisiest frames well inside their
+    /// own noise while barely touching the quietest.
+    pub noise: f64,
     pub transform: Transform,
 }
 
@@ -223,6 +232,139 @@ pub struct Stack {
     frames: usize,
 }
 
+/// What the second pass compares a sample against.
+///
+/// Holds the first pass's running sums rather than its mean, so that each
+/// sample can be judged against the mean of *the others*.
+///
+/// That distinction is the whole scheme. A satellite crossing one frame of a
+/// hundred lifts the plain mean at every cell it touches, and if the ceiling
+/// that decides "this is empty sky, judge it" is read off that mean, a bright
+/// enough streak lifts itself out of the region where anything is judged and is
+/// thereby protected by its own brightness. Removing the sample under test —
+/// exact and cheap, since its own weight and value are both to hand — leaves
+/// the streak judged against sky and thrown out, while a star is still judged
+/// against a star and left alone.
+pub struct Guide {
+    colours: usize,
+    width: usize,
+    /// Pass one's cells, in the accumulator's own interleaved layout.
+    cells: Vec<f32>,
+    /// One byte per cell per colour: whether a value clip may act there.
+    ///
+    /// Not simply "the mean is below the ceiling". Structure has a
+    /// neighbourhood: a star's wings fall below any ceiling a few photosites
+    /// out, while the frames still disagree there by far more than their noise,
+    /// because a run whose sharpness varies spreads the same flux over
+    /// different areas. Judging that skirt rejects whichever frames are sharpest
+    /// or softest depending on which way the mean falls, and that is a filter
+    /// against the very thing the stack is for. So the region above the ceiling
+    /// is grown by a margin before anything is judged outside it.
+    quiet: Vec<bool>,
+}
+
+impl Guide {
+    /// Whether the scene is flat enough here for a value clip to test
+    /// anything, and the mean of the *other* samples to test it against.
+    ///
+    /// Two statistics for two questions, and they must be different ones.
+    ///
+    /// Whether there is structure is a property of the scene, so it is read off
+    /// every frame: a star stands above the ceiling in the full mean at every
+    /// radius that matters, and stays unjudged. Reading it off the mean of the
+    /// others instead would let a star's faint skirt slip under the ceiling as
+    /// soon as the brightest frame is the one being tested, and the skirt is
+    /// exactly where frames of different sharpness disagree most.
+    ///
+    /// Whether *this* sample is an outlier must exclude it, or a bright enough
+    /// streak lifts the average it is compared against and is protected by its
+    /// own brightness.
+    ///
+    /// The gate does inherit one weakness from using every frame: an outlier
+    /// lifts the full mean by its brightness over the depth, so in a stack of
+    /// only a handful of frames a very bright streak can still gate itself out.
+    /// Rejection wants depth, which is true of every scheme of this kind.
+    ///
+    /// The sums are on the same zero as the samples: a deposit arrives as
+    /// `scale * (pixel - background)`, which sits at zero on empty sky, and no
+    /// pedestal is ever added here.
+    fn judge(&self, pixel: usize, colour: usize, share: f32, value: f32) -> Option<f32> {
+        if !self.quiet[pixel * self.colours + colour] {
+            return None;
+        }
+        let at = (pixel * self.colours + colour) * 2;
+        let (sum, weight) = (self.cells[at], self.cells[at + 1]);
+        if weight <= 0.0 {
+            return None;
+        }
+        let rest = weight - share;
+        // One frame alone at a cell has nothing to be an outlier against.
+        (rest > 0.0).then(|| (sum - share * value) / rest)
+    }
+}
+
+/// When a sample may be thrown away.
+///
+/// Kappa-sigma as it is used on darks does not transfer to lights, and the two
+/// fields below are what it takes to make a value clip mean anything here.
+///
+/// A dark has the same expectation at every pixel in every frame, so the spread
+/// across frames *is* the noise and a clip around the mean is a test of it. A
+/// light does not: the same star has a peak brightness that goes as the
+/// reciprocal of the product of its two PSF axes, so across a run whose
+/// trailing varies the frames legitimately disagree at a star by far more than
+/// their noise. A fixed clip there rejects the sharp frames in the wings of the
+/// trail and the trailed ones at the core, which is a filter that removes
+/// exactly the sharpness the stack was for.
+///
+/// So the clip is confined to where the scene is flat, which is where a
+/// satellite spends almost all of its length anyway, and where each sample is
+/// judged against its own frame's noise rather than a pooled one.
+#[derive(Debug, Clone, Copy)]
+pub struct Rejection {
+    /// How many of a frame's own noise a sample may deviate before it goes.
+    pub kappa: f32,
+    /// How far beyond anything above the ceiling the protected region reaches,
+    /// in output pixels.
+    ///
+    /// A star's wings fall below any ceiling within a few photosites of its
+    /// core, and that skirt is where frames of different sharpness disagree
+    /// most. Without a margin the clip acts exactly there.
+    pub margin: usize,
+    /// How much of the local signal counts as legitimate disagreement, on top
+    /// of the noise.
+    ///
+    /// A ceiling alone cannot protect a star, however high it is set: the wings
+    /// of a bright one reach past any fixed level, and the same flux spread
+    /// over different areas by different sharpness makes the frames differ
+    /// there by a share of the signal rather than by a fixed amount. Measured
+    /// on a real run, a fixed threshold leaves a ring of rejection around every
+    /// bright star at the radius where the ceiling happens to fall.
+    ///
+    /// So the threshold grows with what is there: `kappa * noise + tolerance *
+    /// signal`. On empty sky the signal is zero and this changes nothing, which
+    /// is where satellites are caught.
+    pub tolerance: f32,
+    /// How far above the background the stacked value may be and still be
+    /// judged, in units of a single frame's sky noise.
+    ///
+    /// Above it there is structure — a star, a galaxy's arm — and the frames
+    /// disagree there for real reasons, so nothing is rejected and the weights
+    /// carry the result alone.
+    pub quiet: f32,
+}
+
+impl Default for Rejection {
+    fn default() -> Self {
+        // Three sigma is the usual bound and is the same figure the
+        // calibration combiner uses. Five is deliberately timid: it costs a
+        // little rejection over faint nebulosity and buys never touching a
+        // star. Six pixels of margin comfortably covers a star's visible skirt
+        // at this sampling.
+        Self { kappa: 3.0, quiet: 5.0, margin: 6, tolerance: 0.5 }
+    }
+}
+
 /// How wide the drop is, as a fraction of a photosite.
 ///
 /// One means each photosite is spread over a full output cell, which costs a
@@ -244,6 +386,33 @@ impl Stack {
 
     /// Deposits one frame.
     pub fn add(&mut self, frame: &Contribution, pixfrac: f64) {
+        self.deposit(frame, pixfrac, None);
+    }
+
+    /// Deposits one frame, dropping samples that disagree with the first pass.
+    ///
+    /// Returns how many deposits were dropped and how many were considered.
+    /// Both, because a fraction needs both, and the fraction is the number that
+    /// says whether the threshold fits the run: a frame losing a large share is
+    /// not a frame full of satellites but a sign the threshold is
+    /// mis-specified, and that is the user's business rather than something to
+    /// swallow.
+    pub fn add_checked(
+        &mut self,
+        frame: &Contribution,
+        pixfrac: f64,
+        guide: &Guide,
+        rejection: &Rejection,
+    ) -> (usize, usize) {
+        self.deposit(frame, pixfrac, Some((guide, rejection)))
+    }
+
+    fn deposit(
+        &mut self,
+        frame: &Contribution,
+        pixfrac: f64,
+        judge: Option<(&Guide, &Rejection)>,
+    ) -> (usize, usize) {
         let pixfrac = pixfrac.clamp(0.05, 2.0);
         let half = pixfrac / 2.0;
         let width = frame.layout.width as usize;
@@ -259,11 +428,18 @@ impl Stack {
         let shear = frame.transform.b.abs() * f64::from(frame.layout.width) + half + 1.0;
         let scale_y = if frame.transform.a.abs() > 1e-6 { frame.transform.a } else { 1.0 };
         let rows_per_band = (canvas.height / (rayon::current_num_threads() * 4).max(1)).max(64);
+        let dropped = std::sync::atomic::AtomicUsize::new(0);
+        let considered = std::sync::atomic::AtomicUsize::new(0);
 
         self.cells
             .par_chunks_mut(row_cells * rows_per_band)
             .enumerate()
             .for_each(|(band, cells)| {
+                // Counted per band and added once at the end. A run deposits
+                // billions of samples, and an atomic increment per sample is
+                // billions of threads fighting over one cache line -- which
+                // measured twenty times slower than the work it was counting.
+                let (mut band_dropped, mut band_considered) = (0usize, 0usize);
                 let first_row = band * rows_per_band;
                 let rows = cells.len() / row_cells;
                 let (v_lo, v_hi) = (first_row as f64 - 0.5, (first_row + rows) as f64 - 0.5);
@@ -319,6 +495,27 @@ impl Stack {
                                 // The drop area cancels between sum and weight,
                                 // so it is left out of both.
                                 let share = overlap * frame.weight;
+
+                                band_considered += 1;
+                                // Judged against what the *other* frames put
+                                // here, and only where they say the scene is
+                                // flat.
+                                if let Some((guide, rejection)) = judge
+                                    && colour < guide.colours
+                                {
+                                    let pixel = j as usize * guide.width + i as usize;
+                                    let others =
+                                        guide.judge(pixel, colour, share as f32, value as f32);
+                                    if let Some(mean) = others
+                                        && mean.is_finite()
+                                        && (value as f32 - mean).abs()
+                                            > rejection.kappa * frame.noise as f32
+                                                + rejection.tolerance * mean.abs()
+                                    {
+                                        band_dropped += 1;
+                                        continue;
+                                    }
+                                }
                                 let local = (j as usize - first_row) * row_cells
                                     + (i as usize * colours + colour) * 2;
                                 cells[local] += (share * value) as f32;
@@ -327,9 +524,13 @@ impl Stack {
                         }
                     }
                 }
+
+                dropped.fetch_add(band_dropped, std::sync::atomic::Ordering::Relaxed);
+                considered.fetch_add(band_considered, std::sync::atomic::Ordering::Relaxed);
             });
 
         self.frames += 1;
+        (dropped.into_inner(), considered.into_inner())
     }
 
     /// One plane per colour: the weighted mean, plus `pedestal`, and NaN where
@@ -349,6 +550,49 @@ impl Stack {
                     .collect()
             })
             .collect()
+    }
+
+    /// Turns a finished first pass into what the second one judges against.
+    ///
+    /// Consumes the stack: its cells become the guide rather than being copied,
+    /// because at a full frame's canvas they are most of a gigabyte.
+    ///
+    /// `noise` is a single frame's sky sigma, in the units the deposits are in.
+    pub fn into_guide(self, noise: f64, rejection: &Rejection) -> Guide {
+        let (width, height, colours) = (self.canvas.width, self.canvas.height, self.colours);
+        let ceiling = rejection.quiet * noise as f32;
+
+        // Above the ceiling, or within `margin` of somewhere that is. Grown
+        // with two one-dimensional passes rather than a square window: the same
+        // answer, and linear in the margin instead of quadratic.
+        let mut quiet = vec![true; width * height * colours];
+        for colour in 0..colours {
+            let lit: Vec<bool> = (0..width * height)
+                .map(|pixel| {
+                    let at = (pixel * colours + colour) * 2;
+                    let weight = self.cells[at + 1];
+                    weight > 0.0 && self.cells[at] / weight > ceiling
+                })
+                .collect();
+
+            let margin = rejection.margin;
+            let mut rows = vec![false; width * height];
+            for y in 0..height {
+                for x in 0..width {
+                    let (from, to) = (x.saturating_sub(margin), (x + margin).min(width - 1));
+                    rows[y * width + x] = lit[y * width + from..=y * width + to].iter().any(|v| *v);
+                }
+            }
+            for y in 0..height {
+                for x in 0..width {
+                    let (from, to) = (y.saturating_sub(margin), (y + margin).min(height - 1));
+                    let near = (from..=to).any(|row| rows[row * width + x]);
+                    quiet[(y * width + x) * colours + colour] = !near;
+                }
+            }
+        }
+
+        Guide { colours, width, cells: self.cells, quiet }
     }
 
     /// The total weight at each output pixel of one colour, which is how deep
@@ -401,6 +645,268 @@ mod tests {
         Canvas::covering(std::iter::once((layout, Transform::IDENTITY)), 1 << 24).unwrap()
     }
 
+    /// One frame of sky, plus whatever the caller paints on it.
+    fn sky_frame(
+        layout: &ImageLayout,
+        mosaic: &Mosaic,
+        level: f32,
+        mut paint: impl FnMut(usize, usize) -> f32,
+    ) -> Vec<f32> {
+        let width = layout.width as usize;
+        (0..width * layout.height as usize)
+            .map(|index| {
+                let (x, y) = (index % width, index / width);
+                let _ = mosaic.colour_at(x, y);
+                level + paint(x, y)
+            })
+            .collect()
+    }
+
+    /// The sky is subtracted, as the real pipeline subtracts it: a deposit
+    /// arrives at zero on empty sky, and the guide's ceiling is measured from
+    /// there.
+    fn contribution<'a>(
+        pixels: &'a [f32],
+        layout: &'a ImageLayout,
+        mosaic: &'a Mosaic,
+        sky: f64,
+        noise: f64,
+    ) -> Contribution<'a> {
+        Contribution {
+            pixels,
+            layout,
+            mosaic,
+            background: flat(mosaic.colours, sky),
+            scale: 1.0,
+            weight: 1.0,
+            noise,
+            transform: Transform::IDENTITY,
+        }
+    }
+
+    #[test]
+    fn a_satellite_over_sky_is_thrown_out_and_the_sky_is_not() {
+        // What rejection is for. A streak crosses one frame of many; every
+        // other frame has plain sky there, so the streak stands far outside its
+        // own frame's noise in a region with no structure.
+        let layout = layout(64, 64);
+        let mosaic = Mosaic::new(&layout).unwrap();
+        let sky = 500.0f32;
+        let noise = 20.0f64;
+
+        let clean = sky_frame(&layout, &mosaic, sky, |_, _| 0.0);
+        // A bright horizontal streak four rows deep.
+        let streaked = sky_frame(&layout, &mosaic, sky, |_, y| if (30..34).contains(&y) {
+            1200.0
+        } else {
+            0.0
+        });
+
+        // Forty frames rather than a handful: a lone outlier lifts the full
+        // mean by its brightness over the depth, so the gate that decides
+        // "this is empty sky" needs a run deep enough for one streak not to
+        // move it. A stack of eight is not one.
+        const DEEP: usize = 60;
+        let canvas =
+            Canvas::covering(std::iter::once((&layout, Transform::IDENTITY)), 1 << 24).unwrap();
+        let first = {
+            let mut stack = Stack::new(canvas, mosaic.colours);
+            for _ in 0..DEEP {
+                stack.add(&contribution(&clean, &layout, &mosaic, f64::from(sky), noise), DEFAULT_PIXFRAC);
+            }
+            stack.add(&contribution(&streaked, &layout, &mosaic, f64::from(sky), noise), DEFAULT_PIXFRAC);
+            stack
+        };
+        let guide = first.into_guide(noise, &Rejection::default());
+
+        let mut second = Stack::new(canvas, mosaic.colours);
+        let rejection = Rejection::default();
+        let mut lost_clean = 0;
+        for _ in 0..DEEP {
+            let (lost, _) = second.add_checked(
+                &contribution(&clean, &layout, &mosaic, f64::from(sky), noise),
+                DEFAULT_PIXFRAC,
+                &guide,
+                &rejection,
+            );
+            lost_clean += lost;
+        }
+        let (lost_streak, seen) = second.add_checked(
+            &contribution(&streaked, &layout, &mosaic, f64::from(sky), noise),
+            DEFAULT_PIXFRAC,
+            &guide,
+            &rejection,
+        );
+
+        // The streak covers four rows of sixty-four; every deposit in it should
+        // go, and nothing else should.
+        assert!(lost_streak > seen / 20, "the streak survived: {lost_streak} of {seen}");
+        assert_eq!(lost_clean, 0, "clean sky must not be touched");
+
+        // And the result is sky, not sky plus an eighth of a streak.
+        // Along a row the streak crossed, in the plane that has samples there.
+        let planes = second.finish(&vec![0f64; mosaic.colours]);
+        let row = 32 * canvas.width;
+        let mut through: Vec<f32> = planes[mosaic.dominant][row..row + canvas.width]
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        assert!(!through.is_empty(), "the row is empty in this plane");
+        through.sort_by(f32::total_cmp);
+        let middle = through[through.len() / 2];
+        assert!(middle.abs() < 5.0, "the streak leaked into the stack: {middle} above sky");
+    }
+
+    #[test]
+    fn a_star_is_never_judged_however_much_the_frames_disagree() {
+        // The failure the quiet ceiling exists to prevent. Across a run whose
+        // trailing varies, the same star has a peak brightness that spans an
+        // order of magnitude, so a value clip at a star core would reject the
+        // sharp frames or the trailed ones depending which way the mean fell —
+        // and that is a filter which removes the sharpness the stack was for.
+        let layout = layout(64, 64);
+        let mosaic = Mosaic::new(&layout).unwrap();
+        let sky = 500.0f32;
+        let noise = 20.0f64;
+
+        // The same star painted at wildly different peaks, as varying sharpness
+        // does to one.
+        let star = |peak: f32| {
+            sky_frame(&layout, &mosaic, sky, |x, y| {
+                let (dx, dy) = (x as f32 - 32.0, y as f32 - 32.0);
+                peak / (1.0 + (dx * dx + dy * dy) / 4.0).powf(2.5)
+            })
+        };
+        let frames: Vec<Vec<f32>> = [8000.0, 6000.0, 3000.0, 1200.0, 600.0]
+            .iter()
+            .map(|peak| star(*peak))
+            .collect();
+
+        let canvas =
+            Canvas::covering(std::iter::once((&layout, Transform::IDENTITY)), 1 << 24).unwrap();
+        let mut first = Stack::new(canvas, mosaic.colours);
+        for pixels in &frames {
+            first.add(
+                &contribution(pixels, &layout, &mosaic, f64::from(sky), noise),
+                DEFAULT_PIXFRAC,
+            );
+        }
+        let guide = first.into_guide(noise, &Rejection::default());
+
+        let mut second = Stack::new(canvas, mosaic.colours);
+        let mut lost = 0;
+        for pixels in &frames {
+            let (dropped, _) = second.add_checked(
+                &contribution(pixels, &layout, &mosaic, f64::from(sky), noise),
+                DEFAULT_PIXFRAC,
+                &guide,
+                &Rejection::default(),
+            );
+            lost += dropped;
+        }
+        assert_eq!(lost, 0, "a star was judged and {lost} of it thrown away");
+    }
+
+    #[test]
+    fn the_threshold_grows_with_whatever_is_already_there() {
+        // Measured on a real run: a ceiling alone leaves a ring of rejection
+        // around bright stars, at the radius where the stacked value happens to
+        // cross it. The frames disagree there by a share of the signal rather
+        // than by a fixed amount -- the same flux spread over different areas by
+        // different sharpness -- so the threshold has to grow with the signal
+        // too. On empty sky the signal is zero and it changes nothing, which is
+        // where satellites are caught.
+        let noise = 100.0f32;
+        let rejection = Rejection::default();
+        let threshold = |signal: f32| rejection.kappa * noise + rejection.tolerance * signal;
+
+        // On sky the tolerance term contributes nothing at all.
+        assert!((threshold(0.0) - 3.0 * noise).abs() < 1e-3);
+
+        // A satellite over sky is still far outside it.
+        assert!(4000.0 > threshold(20.0), "a streak must still be caught");
+
+        // But a sample sitting on a real source is allowed to disagree with the
+        // others in proportion to how much source there is.
+        let signal = 1500.0f32;
+        let disagreement = 0.4 * signal;
+        assert!(
+            disagreement > rejection.kappa * noise,
+            "the test must exercise a case a fixed threshold would reject"
+        );
+        assert!(
+            disagreement < threshold(signal),
+            "and the signal-proportional threshold must keep it"
+        );
+    }
+
+    #[test]
+    fn each_frame_is_judged_against_its_own_noise_and_not_a_pooled_one() {
+        // The frames of one night do not share a variance -- that is the whole
+        // reason they are weighted. A threshold built from a pooled spread cuts
+        // the noisiest frames well inside their own noise: here one frame is
+        // eight times noisier than the rest, and against a pooled sigma most of
+        // it would go.
+        let layout = layout(96, 96);
+        let mosaic = Mosaic::new(&layout).unwrap();
+        let sky = 500.0f32;
+
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut noisy = move |sigma: f32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32 / 16_777_216.0 - 0.5) * 3.4 * sigma
+        };
+        let quiet: Vec<Vec<f32>> =
+            (0..7).map(|_| sky_frame(&layout, &mosaic, sky, |_, _| noisy(10.0))).collect();
+        let loud = sky_frame(&layout, &mosaic, sky, |_, _| noisy(80.0));
+
+        let canvas =
+            Canvas::covering(std::iter::once((&layout, Transform::IDENTITY)), 1 << 24).unwrap();
+        let mut first = Stack::new(canvas, mosaic.colours);
+        for pixels in &quiet {
+            first.add(&contribution(pixels, &layout, &mosaic, f64::from(sky), 10.0), DEFAULT_PIXFRAC);
+        }
+        first.add(&contribution(&loud, &layout, &mosaic, f64::from(sky), 80.0), DEFAULT_PIXFRAC);
+        let guide = first.into_guide(10.0, &Rejection::default());
+
+        let mut second = Stack::new(canvas, mosaic.colours);
+        for pixels in &quiet {
+            second.add_checked(
+                &contribution(pixels, &layout, &mosaic, f64::from(sky), 10.0),
+                DEFAULT_PIXFRAC,
+                &guide,
+                &Rejection::default(),
+            );
+        }
+        // Judged against its own 80, the loud frame keeps nearly everything.
+        let (lost, seen) = second.add_checked(
+            &contribution(&loud, &layout, &mosaic, f64::from(sky), 80.0),
+            DEFAULT_PIXFRAC,
+            &guide,
+            &Rejection::default(),
+        );
+        let share = lost as f64 / seen as f64;
+        assert!(share < 0.02, "the noisy frame lost {:.1}% of itself", share * 100.0);
+
+        // Against the pooled scale it would not: the same samples cut at three
+        // times the quiet frames' noise lose a large part of the frame.
+        let pooled = Rejection { kappa: 3.0 * 10.0 / 80.0, ..Rejection::default() };
+        let mut third = Stack::new(canvas, mosaic.colours);
+        let (pooled_lost, pooled_seen) = third.add_checked(
+            &contribution(&loud, &layout, &mosaic, f64::from(sky), 80.0),
+            DEFAULT_PIXFRAC,
+            &guide,
+            &pooled,
+        );
+        assert!(
+            pooled_lost as f64 / pooled_seen as f64 > share * 5.0,
+            "the test does not actually separate the two: {pooled_lost} against {lost}"
+        );
+    }
+
     #[test]
     fn a_constant_scene_comes_back_as_itself() {
         let layout = layout(64, 48);
@@ -417,6 +923,7 @@ mod tests {
                 background: flat(mosaic.colours, 0.0),
                 scale: 1.0,
                 weight: 1.0,
+                noise: 40.0,
                 transform: Transform::IDENTITY,
             },
             DEFAULT_PIXFRAC,
@@ -461,6 +968,7 @@ mod tests {
                 background: flat(mosaic.colours, 0.0),
                 scale: 1.0,
                 weight: 1.0,
+                noise: 40.0,
                 transform: Transform { a: 1.0, b: 0.0, tx: 0.37, ty: -0.61 },
             },
             DEFAULT_PIXFRAC,
@@ -508,6 +1016,7 @@ mod tests {
                         background: flat(mosaic.colours, sky * gain),
                         scale,
                         weight,
+                        noise: sigma * gain,
                         transform: Transform {
                             a: 1.0,
                             b: 0.0,
@@ -561,6 +1070,7 @@ mod tests {
                     background: flat(mosaic.colours, 0.0),
                     scale: 1.0,
                     weight: 1.0,
+                    noise: 40.0,
                     transform,
                 },
                 DEFAULT_PIXFRAC,
@@ -600,6 +1110,7 @@ mod tests {
                 background: flat(mosaic.colours, 0.0),
                 scale: 1.0,
                 weight: 1.0,
+                noise: 40.0,
                 transform: Transform { a: 1.0, b: 0.0, tx: 0.5, ty: 0.5 },
             },
             DEFAULT_PIXFRAC,
@@ -648,6 +1159,7 @@ mod tests {
                 background: flat(mosaic.colours, 0.0),
                 scale: 1.0,
                 weight: 1.0,
+                noise: 40.0,
                 transform: *transform,
             };
             if index == 0 {

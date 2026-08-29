@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use astro_core::PluginHost;
 use astro_core::calibrate::{fits, tiff};
-use astro_core::integrate::DEFAULT_PIXFRAC;
+use astro_core::integrate::{DEFAULT_PIXFRAC, Rejection};
 use astro_core::pipeline::stack::{Selection, StackOptions, Stacked, combine, select};
 use astro_core::pipeline::view;
 use astro_core::pipeline::{Flow, Step};
@@ -78,6 +78,16 @@ pub struct StackArgs {
     #[arg(long, value_name = "0..2", default_value_t = DEFAULT_PIXFRAC)]
     pub pixfrac: f64,
 
+    /// Throw out samples that disagree with the rest of the run: satellites,
+    /// aeroplanes, cosmic rays. Costs a second pass over the frames, which is a
+    /// second decode, so it is off unless asked for.
+    #[arg(long)]
+    pub reject: bool,
+
+    /// How many of a frame's own noise a sample may deviate before it goes.
+    #[arg(long, value_name = "SIGMA", default_value_t = 3.0)]
+    pub kappa: f32,
+
     /// Also write a stretched TIFF for looking at, beside the linear one.
     #[arg(long)]
     pub stretch: bool,
@@ -113,6 +123,9 @@ pub fn run(host: &PluginHost, args: &StackArgs, matches_of: &ArgMatches) -> Resu
         max_fwhm: args.max_fwhm,
         max_shift: args.max_shift,
         pixfrac: args.pixfrac,
+        rejection: args
+            .reject
+            .then(|| Rejection { kappa: args.kappa, ..Default::default() }),
     };
     let selection = select(&alignment, &options);
     if selection.frames.is_empty() {
@@ -123,10 +136,16 @@ pub fn run(host: &PluginHost, args: &StackArgs, matches_of: &ArgMatches) -> Resu
     std::fs::create_dir_all(&args.out)
         .with_context(|| format!("creating {}", args.out.display()))?;
     let stacked = combine(host, &selection, &survey.masters, &options, &|step| {
-        if let Step::FrameRead { done, total, .. } = step
+        if let Step::Stacking { pass, passes, done, total, .. } = step
             && !args.scan.quiet
         {
-            eprint!("\r  stacking {done} of {total}");
+            // Rejection needs a second pass over the frames, and a bar that
+            // restarted without saying so reads as a crash.
+            if passes > 1 {
+                eprint!("\r  stacking {done} of {total}, pass {pass} of {passes}");
+            } else {
+                eprint!("\r  stacking {done} of {total}");
+            }
         }
         Flow::Continue
     })?;
@@ -214,6 +233,16 @@ fn report_stack(stacked: &Stacked) {
         (stacked.canvas.width * stacked.canvas.height) as f64 / 1e6
     );
     println!("  combined   {} frames in {:.1}s", stacked.frames, stacked.seconds);
+    if let Some((dropped, considered)) = stacked.rejected {
+        let share = if considered > 0 { dropped as f64 / considered as f64 * 100.0 } else { 0.0 };
+        println!("  rejected   {share:.3}% of samples ({dropped} of {considered})");
+        // A frame losing a large share is not a frame full of satellites; it is
+        // a sign the threshold does not fit the run, and only the user can tell
+        // those apart.
+        for (name, lost) in &stacked.heavy_losses {
+            println!("    {name:<24} lost {:.1}% of its samples", lost * 100.0);
+        }
+    }
     // Per plane, because they are not equally covered and reporting only the
     // dominant one would flatter the result: green photosites are half of a
     // Bayer mosaic and red and blue a quarter each, so the red plane is the one

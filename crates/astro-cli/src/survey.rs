@@ -185,6 +185,8 @@ fn announce(step: Step<'_>, quiet: bool) -> Flow {
                 eprint!("\r  read {done} of {total}");
             }
         }
+        // Reading a run never reaches this one: stacking prints its own.
+        Step::Stacking { .. } => {}
     }
     // The command line has no cancel of its own: Ctrl-C already ends the
     // process, and a second way to stop would be a second thing to keep in step.

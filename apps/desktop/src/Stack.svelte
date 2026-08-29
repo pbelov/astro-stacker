@@ -29,6 +29,8 @@
     seconds: number;
     coverage: Coverage[];
     written: string[];
+    rejected: [number, number] | null;
+    heavyLosses: [string, number][];
     previewWidth: number;
     previewHeight: number;
     note: string;
@@ -37,7 +39,7 @@
     | { stage: "master"; kind: string; done: number; total: number }
     | { stage: "frame"; done: number; total: number; name: string }
     | { stage: "aligning" }
-    | { stage: "stacking"; done: number; total: number; name: string }
+    | { stage: "stacking"; pass: number; passes: number; done: number; total: number; name: string }
     | { stage: "writing" };
 
   let {
@@ -61,6 +63,8 @@
   let maxFwhm = $state<number | null>(null);
   let maxShift = $state<number | null>(null);
   let pixfrac = $state(1);
+  let reject = $state(false);
+  let kappa = $state(3);
   let out = $state("");
 
   let running = $state(false);
@@ -95,6 +99,8 @@
         maxFwhm,
         maxShift,
         pixfrac,
+        reject,
+        kappa,
         out,
         on: channel,
       });
@@ -202,6 +208,27 @@
   </div>
   <p class="dim">{i18n.t("limitsHint")}</p>
 
+  <div class="row reject">
+    <label class="check">
+      <input type="checkbox" checked={reject} onchange={(e) => (reject = e.currentTarget.checked)} />
+      <span>{i18n.t("reject")}</span>
+    </label>
+    {#if reject}
+      <label class="kappa">
+        <span>{i18n.t("kappa")}</span>
+        <input
+          type="number"
+          min="1"
+          max="10"
+          step="0.5"
+          value={kappa}
+          oninput={(e) => (kappa = Number(e.currentTarget.value))}
+        />
+      </label>
+    {/if}
+  </div>
+  <p class="dim">{i18n.t("rejectHint")}</p>
+
   <div class="row out">
     <label for="out">{i18n.t("outFolder")}</label>
     <span class="path num" class:muted={!out}>{out || i18n.t("outNotSet")}</span>
@@ -234,7 +261,9 @@
           done: progress.done,
           total: progress.total,
           name: progress.name,
-        })}
+        })}{#if progress.passes > 1}
+          · {i18n.t("passOf", { pass: progress.pass, passes: progress.passes })}
+        {/if}
       {:else}
         {i18n.t("writing")}
       {/if}
@@ -305,6 +334,28 @@
         {/each}
       </tbody>
     </table>
+
+    {#if result.rejected}
+      <h3>{i18n.t("refused")}</h3>
+      <p class="num">
+        {i18n.t("rejectedShare", {
+          share: trim((result.rejected[0] / Math.max(1, result.rejected[1])) * 100, 3),
+          dropped: result.rejected[0],
+          considered: result.rejected[1],
+        })}
+      </p>
+      {#if result.heavyLosses.length > 0}
+        <p class="warning">{i18n.t("heavyLosses")}</p>
+        <ul class="plain">
+          {#each result.heavyLosses as [name, share] (name)}
+            <li class="warning">
+              <span class="dim">{name}</span>
+              {i18n.t("lostShare", { share: trim(share * 100, 1) })}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {/if}
 
     <h3>{i18n.t("written")}</h3>
     <ul class="plain">
@@ -402,6 +453,21 @@
     border: 1px solid var(--line);
     background: var(--chipbg);
     color: var(--text);
+  }
+
+  .check,
+  .kappa {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .kappa input {
+    width: 5em;
+  }
+  .reject {
+    margin-top: 12px;
   }
 
   .out {

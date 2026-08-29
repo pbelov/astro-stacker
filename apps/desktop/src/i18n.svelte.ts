@@ -158,6 +158,14 @@ const ru = {
   colBrightness: "Яркость",
   colShift: "Сдвиг",
 
+  reject: "Отбраковывать выбросы",
+  rejectHint: "Убирает спутники, самолёты и следы частиц. Стоит ещё одного прохода по кадрам с декодированием, поэтому по умолчанию выключено.",
+  kappa: "Порог, сигм",
+  rejectedShare: "Отброшено {share}% отсчётов ({dropped} из {considered})",
+  heavyLosses: "Потеряли необычно много — это не кадры в спутниках, а признак того, что порог не подходит прогону:",
+  lostShare: "потерял {share}% своих отсчётов",
+  passOf: "проход {pass} из {passes}",
+
   suspicions: "На что стоит посмотреть",
   sMinority: "Набор {set}: {a} кадров против {b} в основной серии — похоже на пробы",
   sBiasNotShortest: "Набор {set}: биасы по {a} с, а самая короткая выдержка {b} с",
@@ -333,6 +341,14 @@ const en: Record<Keys, string> = {
   colWeight: "Weight",
   colBrightness: "Brightness",
   colShift: "Shift",
+
+  reject: "Reject outliers",
+  rejectHint: "Removes satellites, aeroplanes and particle hits. Costs another decoding pass over the frames, so it is off by default.",
+  kappa: "Threshold, sigma",
+  rejectedShare: "Rejected {share}% of samples ({dropped} of {considered})",
+  heavyLosses: "Lost an unusual share — not frames full of satellites, but a sign the threshold does not fit the run:",
+  lostShare: "lost {share}% of its samples",
+  passOf: "pass {pass} of {passes}",
 
   suspicions: "Worth a look",
   sMinority: "Set {set}: {a} frames against {b} in the main series — looks like tests",

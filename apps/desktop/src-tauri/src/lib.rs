@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use astro_core::calibrate::{fits, tiff};
+use astro_core::integrate::Rejection;
 use astro_core::pipeline::stack::{StackOptions, combine, select};
 use astro_core::pipeline::view;
 use astro_core::pipeline::{Flow, Step};
@@ -210,7 +211,7 @@ pub enum Progress {
     /// single bar across all of them would sit still through the slow one, so
     /// each says what it is.
     Aligning,
-    Stacking { done: usize, total: usize, name: String },
+    Stacking { pass: usize, passes: usize, done: usize, total: usize, name: String },
     Writing,
     /// Building one of the masters. These come first and take about a third of
     /// the time, so a bar that only counted lights would sit at zero through
@@ -289,6 +290,13 @@ pub struct StackResultDto {
     /// Per colour plane: what share carries data, and how deep it is.
     pub coverage: Vec<CoverageDto>,
     pub written: Vec<String>,
+    /// How many deposits the second pass threw away, out of how many, or `null`
+    /// where rejection was not asked for.
+    pub rejected: Option<(usize, usize)>,
+    /// Frames that lost an unusual share, worst first. A frame losing a lot is
+    /// not a frame full of satellites but a sign the threshold does not fit the
+    /// run, and only the user can tell those apart.
+    pub heavy_losses: Vec<(String, f64)>,
     /// The preview's own size, which is smaller than the canvas.
     pub preview_width: usize,
     pub preview_height: usize,
@@ -519,6 +527,8 @@ async fn stack_run(
     max_fwhm: Option<f64>,
     max_shift: Option<f64>,
     pixfrac: f64,
+    reject: bool,
+    kappa: f32,
     out: String,
     on: Channel<Progress>,
     state: State<'_, Running>,
@@ -592,6 +602,7 @@ async fn stack_run(
         max_fwhm,
         max_shift,
         pixfrac,
+        rejection: reject.then(|| Rejection { kappa, ..Default::default() }),
     };
     let selection = select(&alignment, &stack_options);
     if selection.frames.is_empty() {
@@ -599,8 +610,14 @@ async fn stack_run(
     }
 
     let stacked = match combine(&host, &selection, &masters, &stack_options, &|step| {
-        if let Step::FrameRead { done, total, name } = step {
-            let _ = on.send(Progress::Stacking { done, total, name: name.to_owned() });
+        if let Step::Stacking { pass, passes, done, total, name } = step {
+            let _ = on.send(Progress::Stacking {
+                pass,
+                passes,
+                done,
+                total,
+                name: name.to_owned(),
+            });
         }
         if stopped() { Flow::Stop } else { Flow::Continue }
     }) {
@@ -671,6 +688,8 @@ async fn stack_run(
             })
             .collect(),
         written,
+        rejected: stacked.rejected,
+        heavy_losses: stacked.heavy_losses.clone(),
         preview_width: rendered.width,
         preview_height: rendered.height,
         note: levelled.note,

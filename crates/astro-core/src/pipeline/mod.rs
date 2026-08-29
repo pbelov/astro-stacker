@@ -65,6 +65,10 @@ pub enum Step<'a> {
     MasterReading { kind: FrameKind, set: SetId, done: usize, total: usize },
     MasterBuilt { kind: FrameKind, master: &'a Master, seconds: f64 },
     FrameRead { done: usize, total: usize, name: &'a str },
+    /// Depositing frames onto the output grid. Rejection needs two passes over
+    /// them, and a progress bar that restarted without saying so reads as a
+    /// crash rather than as the second pass.
+    Stacking { pass: usize, passes: usize, done: usize, total: usize, name: &'a str },
 }
 
 /// Builds the masters a plan calls for.

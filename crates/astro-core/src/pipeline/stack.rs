@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::calibrate::apply;
 use crate::error::{Error, Result};
-use crate::integrate::{Background, Canvas, Contribution, DEFAULT_PIXFRAC, Stack};
+use crate::integrate::{Background, Canvas, Contribution, DEFAULT_PIXFRAC, Guide, Rejection, Stack};
 use crate::register::{Registration, Transform, matches};
 use crate::session::mosaic::Mosaic;
 use crate::stars::Star;
@@ -39,6 +39,9 @@ pub struct StackOptions {
     pub max_fwhm: Option<f64>,
     pub max_shift: Option<f64>,
     pub pixfrac: f64,
+    /// `None` leaves every sample in. Rejection costs a second pass over the
+    /// frames, which is a second decode, so it is the user's to ask for.
+    pub rejection: Option<Rejection>,
 }
 
 impl Default for StackOptions {
@@ -49,6 +52,7 @@ impl Default for StackOptions {
             max_fwhm: None,
             max_shift: None,
             pixfrac: DEFAULT_PIXFRAC,
+            rejection: None,
         }
     }
 }
@@ -243,6 +247,15 @@ pub struct Stacked {
     pub coverage: Vec<Vec<f32>>,
     pub frames: usize,
     pub seconds: f64,
+    /// How many deposits the second pass threw away, and out of how many.
+    /// `None` where rejection was not asked for.
+    pub rejected: Option<(usize, usize)>,
+    /// Frames that lost an unusual share of their samples, worst first.
+    ///
+    /// Reported rather than counted: a frame losing a large fraction is not a
+    /// frame full of satellites, it is a sign the threshold does not fit the
+    /// run, and only the user can tell those apart.
+    pub heavy_losses: Vec<(String, f64)>,
 }
 
 /// Decodes each chosen frame a second time and deposits it.
@@ -250,6 +263,12 @@ pub struct Stacked {
 /// A second decode rather than pixels held from the measuring pass: a run of a
 /// couple of hundred frames is tens of gigabytes of them, and the budget is a
 /// fraction of that.
+/// Decodes each chosen frame again and deposits it, once or twice.
+///
+/// A second decode rather than pixels held from the measuring pass: a run of a
+/// couple of hundred frames is tens of gigabytes of them, and the budget is a
+/// fraction of that. Rejection costs one more decode again, which is why it is
+/// asked for rather than assumed.
 pub fn combine(
     host: &PluginHost,
     selection: &Selection<'_>,
@@ -269,14 +288,112 @@ pub fn combine(
     let mosaic = Mosaic::new(&usable[0].read.layout).ok_or(Error::NothingToCombine)?;
 
     let started = Instant::now();
+    let passes = if options.rejection.is_some() { 2 } else { 1 };
+    let mut pass = deposit(host, &usable, masters, options, canvas, &mosaic, 1, passes, None, on)?;
+
+    let (rejected, heavy_losses) = match options.rejection {
+        None => (None, Vec::new()),
+        Some(rejection) => {
+            // A single frame's sky noise, which is the scale a sample is judged
+            // against. The median over the run rather than any one frame's,
+            // because the guide's ceiling is a property of the stack while the
+            // clip itself uses each frame's own.
+            let mut noises: Vec<f64> =
+                usable.iter().map(|frame| noise_of(frame)).filter(|n| n.is_finite()).collect();
+            noises.sort_by(f64::total_cmp);
+            let noise = if noises.is_empty() { f64::NAN } else { noises[noises.len() / 2] };
+            // The first pass becomes the guide rather than being kept
+            // beside one: its cells are most of a gigabyte at a full canvas.
+            let guide = pass.stack.into_guide(noise, &rejection);
+
+            pass = deposit(
+                host,
+                &usable,
+                masters,
+                options,
+                canvas,
+                &mosaic,
+                2,
+                passes,
+                Some((&guide, &rejection)),
+                on,
+            )?;
+
+            let mut heavy: Vec<(String, f64)> = pass
+                .losses
+                .iter()
+                .filter(|(_, dropped, considered)| {
+                    *considered > 0 && *dropped as f64 / *considered as f64 > HEAVY_LOSS
+                })
+                .map(|(name, dropped, considered)| {
+                    (name.clone(), *dropped as f64 / *considered as f64)
+                })
+                .collect();
+            heavy.sort_by(|a, b| b.1.total_cmp(&a.1));
+            (Some((pass.dropped, pass.considered)), heavy)
+        }
+    };
+
+    let planes = pass.stack.finish(&pass.pedestal);
+    let coverage = (0..mosaic.colours).map(|colour| pass.stack.coverage(colour)).collect();
+
+    Ok(Stacked {
+        canvas,
+        colours: mosaic.colours,
+        planes,
+        pedestal: pass.pedestal,
+        coverage,
+        frames: pass.stack.frames(),
+        seconds: started.elapsed().as_secs_f64(),
+        rejected,
+        heavy_losses,
+    })
+}
+
+/// A frame losing more than this share of its samples is named.
+///
+/// Well above what noise alone produces at three sigma, and well below what a
+/// frame crossed by a satellite loses. Between the two it means the threshold
+/// does not fit the run, which is the user's business and not something to
+/// swallow.
+const HEAVY_LOSS: f64 = 0.02;
+
+struct Pass {
+    stack: Stack,
+    pedestal: Vec<f64>,
+    dropped: usize,
+    considered: usize,
+    losses: Vec<(String, usize, usize)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deposit(
+    host: &PluginHost,
+    usable: &[&Chosen<'_>],
+    masters: &MasterSet,
+    options: &StackOptions,
+    canvas: Canvas,
+    mosaic: &Mosaic,
+    pass: usize,
+    passes: usize,
+    judge: Option<(&Guide, &Rejection)>,
+    on: &dyn Fn(Step) -> Flow,
+) -> Result<Pass> {
     let mut stack = Stack::new(canvas, mosaic.colours);
     let mut pedestal = vec![0f64; mosaic.colours];
     let mut pedestal_weight = 0f64;
+    let (mut dropped, mut considered) = (0usize, 0usize);
+    let mut losses = Vec::with_capacity(usable.len());
 
     for (index, frame) in usable.iter().enumerate() {
-        if on(Step::FrameRead { done: index, total: usable.len(), name: &frame.read.name })
-            == Flow::Stop
-        {
+        let step = Step::Stacking {
+            pass,
+            passes,
+            done: index,
+            total: usable.len(),
+            name: &frame.read.name,
+        };
+        if on(step) == Flow::Stop {
             return Err(Error::Cancelled);
         }
 
@@ -287,28 +404,35 @@ pub fn combine(
                 reason: "floating-point sensor data is not stacked yet".to_owned(),
             });
         };
-        let pixels =
-            apply(&raw, masters.dark.as_ref(), masters.flat.as_ref(), opened.layout()).0;
+        let pixels = apply(&raw, masters.dark.as_ref(), masters.flat.as_ref(), opened.layout()).0;
 
-        let background = Background::fit(&frame.read.detection.sky, &mosaic);
+        let background = Background::fit(&frame.read.detection.sky, mosaic);
         let scale = frame.scale.expect("a frame without a scale was refused");
         for (colour, level) in pedestal.iter_mut().enumerate() {
             *level += frame.weight * scale * background.centre(colour, opened.layout());
         }
         pedestal_weight += frame.weight;
 
-        stack.add(
-            &Contribution {
-                pixels: &pixels,
-                layout: opened.layout(),
-                mosaic: &mosaic,
-                background,
-                scale,
-                weight: frame.weight,
-                transform: frame.registration.transform,
-            },
-            options.pixfrac,
-        );
+        let contribution = Contribution {
+            pixels: &pixels,
+            layout: opened.layout(),
+            mosaic,
+            background,
+            scale,
+            weight: frame.weight,
+            noise: noise_of(frame),
+            transform: frame.registration.transform,
+        };
+        match judge {
+            None => stack.add(&contribution, options.pixfrac),
+            Some((guide, rejection)) => {
+                let (lost, seen) =
+                    stack.add_checked(&contribution, options.pixfrac, guide, rejection);
+                dropped += lost;
+                considered += seen;
+                losses.push((frame.read.name.clone(), lost, seen));
+            }
+        }
     }
 
     // The background was subtracted per frame so a moon rising does not enter
@@ -317,18 +441,12 @@ pub fn combine(
     for level in &mut pedestal {
         *level = if pedestal_weight > 0.0 { *level / pedestal_weight } else { 0.0 };
     }
-    let planes = stack.finish(&pedestal);
-    let coverage = (0..mosaic.colours).map(|colour| stack.coverage(colour)).collect();
+    Ok(Pass { stack, pedestal, dropped, considered, losses })
+}
 
-    Ok(Stacked {
-        canvas,
-        colours: mosaic.colours,
-        planes,
-        pedestal,
-        coverage,
-        frames: stack.frames(),
-        seconds: started.elapsed().as_secs_f64(),
-    })
+/// One frame's sky noise once it has been brought onto the run's brightness.
+fn noise_of(frame: &Chosen<'_>) -> f64 {
+    f64::from(frame.read.detection.shape.noise) * frame.scale.unwrap_or(f64::NAN)
 }
 
 /// The middle of the star field, standing in for the middle of the frame.
