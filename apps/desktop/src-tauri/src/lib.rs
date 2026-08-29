@@ -19,7 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use astro_core::calibrate::{fits, tiff};
+use astro_core::pipeline::stack::{StackOptions, combine, select};
+use astro_core::pipeline::view;
 use astro_core::pipeline::{Flow, Step};
+use astro_core::session::mosaic::Mosaic;
 use astro_core::stars::DetectOptions;
 use astro_core::session::{
     CalibrationMatch, FrameId, FrameKind, FrameRole, Incompatibility, MatchQuality, Mismatch,
@@ -202,6 +206,12 @@ fn development_dirs() -> Vec<PathBuf> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "stage")]
 pub enum Progress {
+    /// Which stage the run is in. Stacking is four passes over the frames and a
+    /// single bar across all of them would sit still through the slow one, so
+    /// each says what it is.
+    Aligning,
+    Stacking { done: usize, total: usize, name: String },
+    Writing,
     /// Building one of the masters. These come first and take about a third of
     /// the time, so a bar that only counted lights would sit at zero through
     /// them and read as a hang.
@@ -252,10 +262,54 @@ pub struct QualityDto {
     pub star_cap: usize,
 }
 
+/// One frame, and what the selection made of it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackedFrameDto {
+    pub name: String,
+    pub weight: f64,
+    pub brightness: f64,
+    pub trail: f64,
+    pub fwhm: f64,
+    pub shift: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackResultDto {
+    pub frames: Vec<StackedFrameDto>,
+    pub refused: Vec<RejectedDto>,
+    /// How many frames of median quality the run is worth. Lower than the count
+    /// whenever the weights are uneven, and the honest answer to how deep it is.
+    pub effective: usize,
+    pub stacked: usize,
+    pub width: usize,
+    pub height: usize,
+    pub seconds: f64,
+    /// Per colour plane: what share carries data, and how deep it is.
+    pub coverage: Vec<CoverageDto>,
+    pub written: Vec<String>,
+    /// The preview's own size, which is smaller than the canvas.
+    pub preview_width: usize,
+    pub preview_height: usize,
+    pub note: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageDto {
+    pub filled: f64,
+    pub median_depth: f64,
+    pub thinnest: f64,
+}
+
 /// Set while a pass runs, cleared when it ends.
 #[derive(Default)]
 pub struct Running {
     cancel: Arc<AtomicBool>,
+    /// The last preview rendered, kept so the window can fetch its pixels as
+    /// bytes rather than as a JSON array of numbers.
+    preview: std::sync::Mutex<Vec<u8>>,
 }
 
 fn host() -> Result<PluginHost, String> {
@@ -435,6 +489,247 @@ fn quality(survey: &astro_core::pipeline::Survey, star_cap: usize) -> QualityDto
         direction_agreement,
         star_cap,
     }
+}
+
+/// The pixels of the last preview, as raw RGBA.
+///
+/// A separate command returning bytes rather than a field on the result: the
+/// same image as a JSON array of numbers is an order of magnitude larger and
+/// has to be parsed a byte at a time.
+#[tauri::command]
+fn stack_preview(state: State<'_, Running>) -> tauri::ipc::Response {
+    let bytes = state.preview.lock().map(|p| p.clone()).unwrap_or_default();
+    tauri::ipc::Response::new(bytes)
+}
+
+/// Reads the run, aligns it, and combines it into one image.
+///
+/// The long one: four passes over every light, two of them decoding. It reports
+/// which stage it is in rather than one bar across all four, and can be stopped
+/// at any of them.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn stack_run(
+    roots: Roots,
+    sigma: f32,
+    max_stars: usize,
+    raw: bool,
+    sharpness: f64,
+    max_trail: Option<f64>,
+    max_fwhm: Option<f64>,
+    max_shift: Option<f64>,
+    pixfrac: f64,
+    out: String,
+    on: Channel<Progress>,
+    state: State<'_, Running>,
+) -> Result<StackResultDto, String> {
+    let rules = roots.rules();
+    if rules.is_empty() {
+        return Err("nothing to stack".to_owned());
+    }
+    let cancel = state.cancel.clone();
+    cancel.store(false, Ordering::Relaxed);
+    let stopped = || cancel.load(Ordering::Relaxed);
+
+    let host = host()?;
+    let options = ScanOptions { rules, ..Default::default() };
+    let report = astro_core::session::scan(&host, &options).map_err(|e| format!("{e:#}"))?;
+    let partition = report.session.partition(&Tolerances::default());
+    let session = &report.session;
+
+    let ranked = partition.plans_by_depth(session);
+    let Some(&(plan, _)) = ranked.first() else {
+        return Err("no stackable set of lights was formed".to_owned());
+    };
+    let Some(lights) = partition.set(plan.lights) else {
+        return Err("the deepest plan names a set that is not in the partition".to_owned());
+    };
+
+    let masters = if raw {
+        astro_core::pipeline::MasterSet::default()
+    } else {
+        let report = |step: Step<'_>| {
+            if let Step::MasterReading { kind, done, total, .. } = step {
+                let _ = on.send(Progress::Master { kind: kind.name().to_owned(), done, total });
+            }
+            if stopped() { Flow::Stop } else { Flow::Continue }
+        };
+        match astro_core::pipeline::masters(
+            &host,
+            session,
+            &partition,
+            plan,
+            &Default::default(),
+            &report,
+        ) {
+            Ok(masters) => masters,
+            Err(astro_core::Error::Cancelled) => return Err("cancelled".to_owned()),
+            Err(error) => return Err(format!("{error:#}")),
+        }
+    };
+
+    let ids: Vec<FrameId> =
+        lights.members.iter().copied().filter(|id| session[*id].is_active()).collect();
+    let detect = DetectOptions { detect_sigma: sigma, max_stars, ..Default::default() };
+    let survey = astro_core::pipeline::survey(&host, session, &ids, &masters, &detect, &|step| {
+        if let Step::FrameRead { done, total, name } = step {
+            let _ = on.send(Progress::Frame { done, total, name: name.to_owned() });
+        }
+        if stopped() { Flow::Stop } else { Flow::Continue }
+    });
+    if survey.stopped {
+        return Err("cancelled".to_owned());
+    }
+
+    let _ = on.send(Progress::Aligning);
+    let alignment =
+        astro_core::pipeline::align::align(&survey.frames, None, &Default::default())
+            .ok_or("the run holds too few lights to align")?;
+
+    let stack_options = StackOptions {
+        sharpness,
+        max_trail,
+        max_fwhm,
+        max_shift,
+        pixfrac,
+    };
+    let selection = select(&alignment, &stack_options);
+    if selection.frames.is_empty() {
+        return Err("every frame was refused, so there is nothing to stack".to_owned());
+    }
+
+    let stacked = match combine(&host, &selection, &masters, &stack_options, &|step| {
+        if let Step::FrameRead { done, total, name } = step {
+            let _ = on.send(Progress::Stacking { done, total, name: name.to_owned() });
+        }
+        if stopped() { Flow::Stop } else { Flow::Continue }
+    }) {
+        Ok(stacked) => stacked,
+        Err(astro_core::Error::Cancelled) => return Err("cancelled".to_owned()),
+        Err(error) => return Err(format!("{error:#}")),
+    };
+
+    let _ = on.send(Progress::Writing);
+    let first = selection.frames.first().ok_or("nothing was stacked")?;
+    let mosaic = Mosaic::new(&first.read.layout).ok_or("the frames are not a mosaic")?;
+
+    let written = write(&stacked, &selection, &mosaic, &out).map_err(|e| format!("{e:#}"))?;
+
+    // The preview is rendered from the levelled copy, the same one the stretched
+    // TIFF beside it comes from, so the window and the file agree.
+    let levelled = view::for_viewing(&stacked, &first.read.layout, &mosaic, true);
+    let rendered = view::preview(&levelled, &stacked, 1400, 200.0);
+    if let Ok(mut slot) = state.preview.lock() {
+        *slot = rendered.rgba;
+    }
+
+    let mut weights: Vec<f64> =
+        selection.frames.iter().map(|f| f.weight).filter(|w| w.is_finite()).collect();
+    weights.sort_by(f64::total_cmp);
+    let total: f64 = weights.iter().sum();
+    let squares: f64 = weights.iter().map(|w| w * w).sum();
+
+    Ok(StackResultDto {
+        frames: selection
+            .frames
+            .iter()
+            .map(|frame| StackedFrameDto {
+                name: frame.read.name.clone(),
+                weight: frame.weight,
+                brightness: frame.scale.unwrap_or(f64::NAN),
+                trail: frame.read.detection.shape.moments.trail(),
+                fwhm: frame.read.detection.shape.moments.minor_fwhm(),
+                shift: frame.shift,
+            })
+            .collect(),
+        refused: selection
+            .refused
+            .iter()
+            .map(|(name, reason)| RejectedDto { name: name.clone(), reason: reason.clone() })
+            .collect(),
+        effective: if squares > 0.0 { (total * total / squares).round() as usize } else { 0 },
+        stacked: stacked.frames,
+        width: stacked.canvas.width,
+        height: stacked.canvas.height,
+        seconds: stacked.seconds,
+        coverage: stacked
+            .coverage
+            .iter()
+            .map(|plane| {
+                let mut depths: Vec<f32> =
+                    plane.iter().copied().filter(|w| *w > 0.0).collect();
+                if depths.is_empty() {
+                    return CoverageDto { filled: 0.0, median_depth: 0.0, thinnest: 0.0 };
+                }
+                depths.sort_by(f32::total_cmp);
+                let at = |f: f64| f64::from(depths[((depths.len() - 1) as f64 * f) as usize]);
+                CoverageDto {
+                    filled: depths.len() as f64 / plane.len() as f64 * 100.0,
+                    median_depth: at(0.5),
+                    thinnest: at(0.1),
+                }
+            })
+            .collect(),
+        written,
+        preview_width: rendered.width,
+        preview_height: rendered.height,
+        note: levelled.note,
+    })
+}
+
+/// Writes the FITS and both TIFFs, exactly as the command line does.
+fn write(
+    stacked: &astro_core::pipeline::stack::Stacked,
+    selection: &astro_core::pipeline::stack::Selection<'_>,
+    mosaic: &Mosaic,
+    out: &str,
+) -> std::io::Result<Vec<String>> {
+    let dir = PathBuf::from(out);
+    std::fs::create_dir_all(&dir)?;
+    let first = &selection.frames[0];
+    let (width, height) = (stacked.canvas.width, stacked.canvas.height);
+
+    let header = fits::Header {
+        image_type: FrameKind::Light.name().to_owned(),
+        instrument: first.read.camera_model.clone(),
+        exposure: first.read.exposure_seconds,
+        iso: first.read.iso,
+        frames: stacked.frames,
+        combination: "weighted mean".to_owned(),
+        bayer_pattern: None,
+        notes: vec!["NaN where no frame covered the pixel".to_owned()],
+    };
+    let borrowed: Vec<&[f32]> = stacked.planes.iter().map(|p| p.as_slice()).collect();
+    let mut written = Vec::new();
+
+    let target = dir.join("stack.fits");
+    fits::write_planes(&target, &borrowed, width, height, &header)?;
+    written.push(target.display().to_string());
+
+    let linear = view::for_viewing(stacked, &first.read.layout, mosaic, false);
+    let planes: Vec<&[f32]> = linear.planes.iter().map(|p| p.as_slice()).collect();
+    let target = dir.join("stack.tif");
+    tiff::write(
+        &target,
+        &tiff::Image { width, height, planes: &planes[..mosaic.colours.min(3)] },
+        &tiff::Mapping::Linear { full: linear.full },
+        &linear.note,
+    )?;
+    written.push(target.display().to_string());
+
+    let levelled = view::for_viewing(stacked, &first.read.layout, mosaic, true);
+    let planes: Vec<&[f32]> = levelled.planes.iter().map(|p| p.as_slice()).collect();
+    let floor = view::percentile(&levelled.planes[mosaic.dominant], 0.02).min(levelled.common);
+    let target = dir.join("stack_view.tif");
+    tiff::write(
+        &target,
+        &tiff::Image { width, height, planes: &planes[..mosaic.colours.min(3)] },
+        &tiff::Mapping::Asinh { black: floor, white: levelled.full, softening: 200.0 },
+        &levelled.note,
+    )?;
+    written.push(target.display().to_string());
+
+    Ok(written)
 }
 
 #[tauri::command]
@@ -696,6 +991,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_session,
             measure_quality,
+            stack_run,
+            stack_preview,
             cancel,
             app_version,
             formats
@@ -841,6 +1138,90 @@ mod tests {
             assert!(frame.stars > 0, "{} found no stars", frame.name);
             assert!(frame.trail.is_finite(), "{} has no trail", frame.name);
         }
+    }
+
+    #[test]
+    fn a_stack_comes_out_the_size_of_its_canvas_and_its_preview_matches() {
+        // The preview travels as loose bytes with its size in a separate field,
+        // so nothing checks the two agree except this. A mismatch draws
+        // diagonal garbage into the canvas, which looks like a decoding bug
+        // rather than like an off-by-one here.
+        let Some(root) = testdata() else { return };
+        let host = host().expect("a plugin loads");
+        let options = ScanOptions {
+            rules: vec![
+                RoleRule::new(root.join("lights"), Some(FrameKind::Light)),
+                RoleRule::new(root.join("darks"), Some(FrameKind::Dark)),
+                RoleRule::new(root.join("flats56_iso100-1"), Some(FrameKind::Flat)),
+                RoleRule::new(root.join("bias"), Some(FrameKind::Bias)),
+            ],
+            ..Default::default()
+        };
+        let report = astro_core::session::scan(&host, &options).expect("the session scans");
+        let partition = report.session.partition(&Tolerances::default());
+        let session = &report.session;
+        let (plan, _) = partition.plans_by_depth(session)[0];
+        let lights = partition.set(plan.lights).expect("the plan has its set");
+
+        let ids: Vec<FrameId> = lights
+            .members
+            .iter()
+            .copied()
+            .filter(|id| session[*id].is_active())
+            .skip(100)
+            .take(6)
+            .collect();
+        let masters = astro_core::pipeline::masters(
+            &host,
+            session,
+            &partition,
+            plan,
+            &Default::default(),
+            &|_| Flow::Continue,
+        )
+        .expect("the masters build");
+        let survey = astro_core::pipeline::survey(
+            &host,
+            session,
+            &ids,
+            &masters,
+            &DetectOptions::default(),
+            &|_| Flow::Continue,
+        );
+
+        let alignment =
+            astro_core::pipeline::align::align(&survey.frames, None, &Default::default())
+                .expect("six frames align");
+        let options = StackOptions::default();
+        let selection = select(&alignment, &options);
+        let stacked = combine(&host, &selection, &masters, &options, &|_| Flow::Continue)
+            .expect("they combine");
+
+        assert_eq!(stacked.frames, 6);
+        assert_eq!(stacked.planes.len(), stacked.colours);
+        for plane in &stacked.planes {
+            assert_eq!(plane.len(), stacked.canvas.width * stacked.canvas.height);
+        }
+
+        let first = &selection.frames[0];
+        let mosaic = Mosaic::new(&first.read.layout).expect("a mosaic");
+        let levelled = view::for_viewing(&stacked, &first.read.layout, &mosaic, true);
+        let rendered = view::preview(&levelled, &stacked, 1400, 200.0);
+
+        assert_eq!(
+            rendered.rgba.len(),
+            rendered.width * rendered.height * 4,
+            "the byte count must match the size the window is told"
+        );
+        assert!(rendered.width <= 1400 && rendered.height <= 1400);
+        // And it is a picture rather than a black rectangle: a preview whose
+        // stretch collapsed would still be the right size.
+        let bright = rendered.rgba.as_chunks::<4>().0.iter().filter(|p| p[0] > 24 || p[1] > 24).count();
+        assert!(
+            bright > rendered.width * rendered.height / 100,
+            "the preview is nearly all black: {bright} lit of {}",
+            rendered.width * rendered.height
+        );
     }
 
     #[test]
