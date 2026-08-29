@@ -13,6 +13,10 @@
 //! decides whether that becomes a line on a terminal, a bar in a window, or
 //! nothing at all.
 
+pub mod align;
+pub mod stack;
+pub mod view;
+
 use std::time::Instant;
 
 use astro_plugin_abi::abi::ImageLayout;

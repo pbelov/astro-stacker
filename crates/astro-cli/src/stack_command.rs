@@ -19,20 +19,21 @@
 //! throws away good extended-structure signal.
 
 use std::path::PathBuf;
-use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use astro_core::calibrate::{apply, fits, tiff};
-use astro_core::integrate::{Background, Canvas, Contribution, DEFAULT_PIXFRAC, Stack};
-use astro_core::register::{Registration, Transform, matches};
+use astro_core::PluginHost;
+use astro_core::calibrate::{fits, tiff};
+use astro_core::integrate::DEFAULT_PIXFRAC;
+use astro_core::pipeline::stack::{Selection, StackOptions, Stacked, combine, select};
+use astro_core::pipeline::view;
+use astro_core::pipeline::{Flow, Step};
 use astro_core::session::FrameKind;
 use astro_core::session::mosaic::Mosaic;
-use astro_core::{PluginHost, Samples};
 use clap::{ArgMatches, Args};
 
 use crate::align::{AlignArgs, align};
 use crate::format;
-use crate::survey::{SurveyArgs, Surveyed};
+use crate::survey::SurveyArgs;
 
 #[derive(Args, Debug)]
 pub struct StackArgs {
@@ -86,47 +87,18 @@ pub struct StackArgs {
     pub each: bool,
 }
 
-/// One frame, ready to be stacked.
-struct Chosen<'a> {
-    read: &'a Surveyed,
-    registration: Registration,
-    /// Multiplies this frame's background-subtracted pixels to bring it onto
-    /// the run's common brightness. `None` where too few stars were shared with
-    /// the reference to measure it.
-    scale: Option<f64>,
-    weight: f64,
-    shift: f64,
-}
-
-/// The largest output grid worth allocating, in pixels.
-const CANVAS_LIMIT: usize = 400_000_000;
-/// How close a star must land to be the same star, when the transform is
-/// already fitted. Tighter than matching, because this is confirmation and not
-/// search.
-const PHOTOMETRY_RADIUS: f64 = 3.0;
-/// Below this many shared stars a brightness ratio is noise wearing a number.
-const MIN_PHOTOMETRY_STARS: usize = 12;
-
 pub fn run(host: &PluginHost, args: &StackArgs, matches_of: &ArgMatches) -> Result<()> {
     if !(0.0..=2.0).contains(&args.sharpness) {
         bail!("--sharpness {} is outside 0 to 2", args.sharpness);
     }
     let survey = crate::survey::read(host, &args.scan, matches_of, &args.survey)?;
-    if survey.frames.len() < 2 {
-        bail!("stacking needs at least two lights, and this run offered {}", survey.frames.len());
-    }
-    println!(
-        "  read {} in {:.1}s",
-        format::plural(survey.frames.len(), "frame"),
-        survey.seconds
-    );
+    println!("  read {} in {:.1}s", format::plural(survey.frames.len(), "frame"), survey.seconds);
 
     let alignment = align(&survey.frames, &args.align)?;
-    let reference = alignment.reference;
     println!(
         "  reference  {} ({} stars)",
-        alignment.frames[reference].name(),
-        alignment.frames[reference].stars().len()
+        alignment.frames[alignment.reference].name(),
+        alignment.frames[alignment.reference].stars().len()
     );
     println!(
         "  registered {} of {} in {:.1}s",
@@ -135,189 +107,57 @@ pub fn run(host: &PluginHost, args: &StackArgs, matches_of: &ArgMatches) -> Resu
         alignment.seconds
     );
 
-    // The frame centre, so a shift is the distance the picture moved rather
-    // than a translation measured from a corner.
-    let anchor: Vec<_> = alignment.frames[reference].stars().to_vec();
-    let (cx, cy) = centre_of(&anchor);
-
-    let mut chosen: Vec<Chosen> = Vec::new();
-    let mut refused: Vec<(String, String)> = Vec::new();
-    for frame in &alignment.frames {
-        let Some(registration) = frame.registration else {
-            refused.push((frame.name().to_owned(), "did not register".to_owned()));
-            continue;
-        };
-        let (dx, dy) = registration.transform.displacement_at(cx, cy);
-        let shift = (dx * dx + dy * dy).sqrt();
-        let scale = brightness_of(&anchor, frame.stars(), &registration.transform);
-        chosen.push(Chosen {
-            read: frame.read,
-            registration,
-            scale,
-            weight: f64::NAN,
-            shift,
-        });
-    }
-
-    apply_thresholds(&mut chosen, &mut refused, args);
-    weigh(&mut chosen, args.sharpness);
-    if chosen.is_empty() {
+    let options = StackOptions {
+        sharpness: args.sharpness,
+        max_trail: args.max_trail,
+        max_fwhm: args.max_fwhm,
+        max_shift: args.max_shift,
+        pixfrac: args.pixfrac,
+    };
+    let selection = select(&alignment, &options);
+    if selection.frames.is_empty() {
         bail!("every frame was refused, so there is nothing to stack");
     }
+    report_selection(&selection, args);
 
-    report_selection(&chosen, &refused, args);
-    let written = combine(host, &survey, &chosen, args)?;
-    for path in written {
+    std::fs::create_dir_all(&args.out)
+        .with_context(|| format!("creating {}", args.out.display()))?;
+    let stacked = combine(host, &selection, &survey.masters, &options, &|step| {
+        if let Step::FrameRead { done, total, .. } = step
+            && !args.scan.quiet
+        {
+            eprint!("\r  stacking {done} of {total}");
+        }
+        Flow::Continue
+    })?;
+    if !args.scan.quiet {
+        eprint!("\r                                        \r");
+    }
+    report_stack(&stacked);
+
+    for path in write_result(&stacked, &selection, args)? {
         println!("  wrote      {}", path.display());
     }
     Ok(())
 }
 
-/// The brightness of one frame against the reference, from the stars they share.
-///
-/// Measured on stars and never on the sky, because the two do not move together:
-/// thin cirrus dims the stars while *raising* the sky, by scattering city light
-/// back down. A scale taken from sky level would then multiply the clear frames
-/// down and the hazy ones up, which is the opposite of the correction wanted.
-///
-/// The flux each star carries is already independent of how blurred it is, so a
-/// trailed frame does not read as a cloudy one.
-fn brightness_of(reference: &[astro_core::stars::Star], frame: &[astro_core::stars::Star], transform: &Transform) -> Option<f64> {
-    let pairs = matches(reference, frame, transform, PHOTOMETRY_RADIUS);
-    let mut ratios: Vec<f64> = pairs
-        .iter()
-        .filter_map(|(f, r)| {
-            let (a, b) = (reference[*r].flux, frame[*f].flux);
-            (a.is_finite() && b.is_finite() && b > 0.0 && a > 0.0).then_some(a / b)
-        })
-        .collect();
-    if ratios.len() < MIN_PHOTOMETRY_STARS {
-        return None;
-    }
-    ratios.sort_by(f64::total_cmp);
-    Some(ratios[ratios.len() / 2])
-}
-
-/// Whether a measurement fails a limit.
-///
-/// An unmeasurable value fails it. When the owner has asked for frames under a
-/// trail of six photosites, a frame whose trail could not be measured is not a
-/// frame known to be under six.
-fn over(value: f64, limit: f64) -> bool {
-    value.is_nan() || value > limit
-}
-
-fn describe(what: &str, value: f64, limit: f64) -> String {
-    if value.is_nan() {
-        format!("{what} could not be measured, so it cannot be shown to be under {limit:.2}")
-    } else {
-        format!("{what} {value:.2} px over the {limit:.2} limit")
-    }
-}
-
-fn apply_thresholds(chosen: &mut Vec<Chosen>, refused: &mut Vec<(String, String)>, args: &StackArgs) {
-    chosen.retain(|frame| {
-        let shape = &frame.read.detection.shape;
-        let reason = if frame.scale.is_none() {
-            Some(format!(
-                "shares fewer than {MIN_PHOTOMETRY_STARS} measurable stars with the reference, \
-                 so its brightness could not be put on the same scale"
-            ))
-        } else if let Some(limit) = args.max_trail
-            && over(shape.moments.trail(), limit)
-        {
-            Some(describe("trail", shape.moments.trail(), limit))
-        } else if let Some(limit) = args.max_fwhm
-            && over(shape.moments.minor_fwhm(), limit)
-        {
-            Some(describe("fwhm", shape.moments.minor_fwhm(), limit))
-        } else if let Some(limit) = args.max_shift
-            && frame.shift > limit
-        {
-            Some(format!("moved {:.0} px, over the {limit:.0} limit", frame.shift))
-        } else {
-            None
-        };
-        match reason {
-            Some(why) => {
-                refused.push((frame.read.name.clone(), why));
-                false
-            }
-            None => true,
-        }
-    });
-}
-
-/// The weight of each frame, gauged so the median frame sits near one.
-///
-/// `(sigma_med / (scale * sigma))^2 * (area_med / area)^sharpness`. The scale
-/// belongs inside the square because multiplying a frame up multiplies its
-/// noise with it; leaving it out weights a hazy frame as though it had been
-/// clear, and can make the result noisier than an unweighted mean of the good
-/// frames alone.
-fn weigh(chosen: &mut [Chosen], sharpness: f64) {
-    let area_of = |frame: &Chosen| {
-        let m = frame.read.detection.shape.moments;
-        // The registration residual is a real blur and belongs in the area: at
-        // 0.34 px it costs 4% of the cross-trail width and at 1.56 px it costs
-        // 60%. Half the squared 2-D radius is the per-axis variance.
-        let spread = frame.registration.residual * frame.registration.residual / 2.0;
-        let determinant =
-            (m.m11 + spread) * (m.m22 + spread) - m.m12 * m.m12;
-        (determinant > 0.0).then(|| 4.0 * std::f64::consts::PI * determinant.sqrt())
-    };
-
-    let mut noises: Vec<f64> = chosen
-        .iter()
-        .filter_map(|f| {
-            let sigma = f64::from(f.read.detection.shape.noise) * f.scale.unwrap_or(f64::NAN);
-            sigma.is_finite().then_some(sigma)
-        })
-        .collect();
-    let mut areas: Vec<f64> = chosen.iter().filter_map(area_of).collect();
-    let median = |values: &mut Vec<f64>| {
-        if values.is_empty() {
-            return f64::NAN;
-        }
-        values.sort_by(f64::total_cmp);
-        values[values.len() / 2]
-    };
-    let (noise_gauge, area_gauge) = (median(&mut noises), median(&mut areas));
-
-    for frame in chosen.iter_mut() {
-        let sigma = f64::from(frame.read.detection.shape.noise) * frame.scale.unwrap_or(f64::NAN);
-        let area = area_of(frame);
-        frame.weight = match (sigma.is_finite() && sigma > 0.0, area) {
-            (true, Some(area)) if area > 0.0 => {
-                (noise_gauge / sigma).powi(2) * (area_gauge / area).powf(sharpness)
-            }
-            // A frame whose noise or shape could not be measured cannot be
-            // weighed against the others. It is not given an average weight:
-            // that would be a guess dressed as a measurement.
-            _ => f64::NAN,
-        };
-    }
-}
-
-fn report_selection(chosen: &[Chosen], refused: &[(String, String)], args: &StackArgs) {
-    if !refused.is_empty() {
-        println!("\n{} refused:", format::plural(refused.len(), "frame"));
-        for (name, why) in refused {
+fn report_selection(selection: &Selection<'_>, args: &StackArgs) {
+    if !selection.refused.is_empty() {
+        println!("\n{} refused:", format::plural(selection.refused.len(), "frame"));
+        for (name, why) in &selection.refused {
             println!("  {name:<24} {why}");
         }
     }
 
-    let usable = chosen.iter().filter(|f| f.weight.is_finite() && f.weight > 0.0).count();
-    println!("\nstacking {} of {}", usable, chosen.len() + refused.len());
-    if usable < chosen.len() {
-        println!(
-            "  {} could not be weighed and will not contribute",
-            chosen.len() - usable
-        );
+    let usable = selection.frames.iter().filter(|f| f.usable()).count();
+    println!("\nstacking {} of {}", usable, selection.frames.len() + selection.refused.len());
+    if usable < selection.frames.len() {
+        println!("  {} could not be weighed and will not contribute", selection.frames.len() - usable);
     }
 
-    let mut weights: Vec<f64> = chosen.iter().map(|f| f.weight).filter(|w| w.is_finite()).collect();
-    let mut scales: Vec<f64> = chosen.iter().filter_map(|f| f.scale).collect();
+    let mut weights: Vec<f64> =
+        selection.frames.iter().map(|f| f.weight).filter(|w| w.is_finite()).collect();
+    let mut scales: Vec<f64> = selection.frames.iter().filter_map(|f| f.scale).collect();
     weights.sort_by(f64::total_cmp);
     scales.sort_by(f64::total_cmp);
     if !weights.is_empty() {
@@ -350,7 +190,7 @@ fn report_selection(chosen: &[Chosen], refused: &[(String, String)], args: &Stac
 
     if args.each {
         println!();
-        for frame in chosen {
+        for frame in &selection.frames {
             let shape = &frame.read.detection.shape;
             println!(
                 "  {:<24} weight {:>7.3}  brightness {:>6.3}  trail {:>5.2}  fwhm {:>5.2}  \
@@ -366,100 +206,21 @@ fn report_selection(chosen: &[Chosen], refused: &[(String, String)], args: &Stac
     }
 }
 
-fn combine(
-    host: &PluginHost,
-    survey: &crate::survey::Read,
-    chosen: &[Chosen],
-    args: &StackArgs,
-) -> Result<Vec<PathBuf>> {
-    std::fs::create_dir_all(&args.out)
-        .with_context(|| format!("creating {}", args.out.display()))?;
-
-    let usable: Vec<&Chosen> =
-        chosen.iter().filter(|f| f.weight.is_finite() && f.weight > 0.0).collect();
-    let canvas = Canvas::covering(
-        usable.iter().map(|f| (&f.read.layout, f.registration.transform)),
-        CANVAS_LIMIT,
-    )
-    .context("the frames do not describe a grid to stack onto")?;
-    let mosaic = Mosaic::new(&usable[0].read.layout)
-        .context("the reference frame is not a mosaic this can stack")?;
-
+fn report_stack(stacked: &Stacked) {
     println!(
-        "\n  canvas     {} by {} ({:.1} Mpx), {:.2} GiB of accumulators",
-        canvas.width,
-        canvas.height,
-        (canvas.width * canvas.height) as f64 / 1e6,
-        (canvas.width * canvas.height * mosaic.colours * 2 * 4) as f64 / (1u64 << 30) as f64
+        "\n  canvas     {} by {} ({:.1} Mpx)",
+        stacked.canvas.width,
+        stacked.canvas.height,
+        (stacked.canvas.width * stacked.canvas.height) as f64 / 1e6
     );
-
-    let mut stack = Stack::new(canvas, mosaic.colours);
-    let started = Instant::now();
-    let mut pedestal = vec![0f64; mosaic.colours];
-    let mut pedestal_weight = 0f64;
-
-    for frame in &usable {
-        let opened = host
-            .open(&frame.read.path)
-            .with_context(|| format!("opening {}", frame.read.path.display()))?;
-        let Samples::U16(raw) = opened
-            .decode()
-            .with_context(|| format!("decoding {}", frame.read.path.display()))?
-        else {
-            bail!("{}: floating-point sensor data is not stacked yet", frame.read.name);
-        };
-        let pixels = apply(
-            &raw,
-            survey.masters.dark.as_ref(),
-            survey.masters.flat.as_ref(),
-            opened.layout(),
-        )
-        .0;
-
-        let background = Background::fit(&frame.read.detection.sky, &mosaic);
-        let scale = frame.scale.expect("a frame without a scale was refused");
-        for (colour, level) in pedestal.iter_mut().enumerate() {
-            *level += frame.weight * scale * background.centre(colour, opened.layout());
-        }
-        pedestal_weight += frame.weight;
-
-        stack.add(
-            &Contribution {
-                pixels: &pixels,
-                layout: opened.layout(),
-                mosaic: &mosaic,
-                background,
-                scale,
-                weight: frame.weight,
-                transform: frame.registration.transform,
-            },
-            args.pixfrac,
-        );
-    }
-
-    // The background was subtracted per frame so that a moon rising does not
-    // enter the stack as a gradient. One common level goes back, so the result
-    // reads like an exposure rather than like a difference, and the FITS says
-    // what it was.
-    for level in &mut pedestal {
-        *level = if pedestal_weight > 0.0 { *level / pedestal_weight } else { 0.0 };
-    }
-    let planes = stack.finish(&pedestal);
-    println!(
-        "  combined   {} frames in {:.1}s",
-        stack.frames(),
-        started.elapsed().as_secs_f64()
-    );
-
+    println!("  combined   {} frames in {:.1}s", stacked.frames, stacked.seconds);
     // Per plane, because they are not equally covered and reporting only the
     // dominant one would flatter the result: green photosites are half of a
     // Bayer mosaic and red and blue a quarter each, so the red plane is the one
     // that says whether the run dithered enough to fill the grid.
     println!("  coverage   per plane, and how evenly deep");
-    for colour in 0..mosaic.colours {
-        let coverage = stack.coverage(colour);
-        let mut depths: Vec<f32> =
-            coverage.iter().copied().filter(|weight| *weight > 0.0).collect();
+    for (colour, coverage) in stacked.coverage.iter().enumerate() {
+        let mut depths: Vec<f32> = coverage.iter().copied().filter(|w| *w > 0.0).collect();
         if depths.is_empty() {
             println!("    plane {colour}  nothing reached it at all");
             continue;
@@ -474,208 +235,69 @@ fn combine(
             at(0.1)
         );
     }
-
-    write_result(&planes, canvas, &mosaic, chosen, &pedestal, args)
 }
 
 fn write_result(
-    planes: &[Vec<f32>],
-    canvas: Canvas,
-    mosaic: &Mosaic,
-    chosen: &[Chosen],
-    pedestal: &[f64],
+    stacked: &Stacked,
+    selection: &Selection<'_>,
     args: &StackArgs,
 ) -> Result<Vec<PathBuf>> {
-    let first = chosen.first().context("nothing was stacked")?;
+    let first = selection.frames.first().context("nothing was stacked")?;
+    let mosaic = Mosaic::new(&first.read.layout).context("the frames are not a mosaic")?;
+    let (width, height) = (stacked.canvas.width, stacked.canvas.height);
+
     let header = fits::Header {
         image_type: FrameKind::Light.name().to_owned(),
         instrument: first.read.camera_model.clone(),
         exposure: first.read.exposure_seconds,
         iso: first.read.iso,
-        frames: chosen.len(),
+        frames: stacked.frames,
         combination: format!("weighted mean, sharpness {}", args.sharpness),
         // Deliberately absent: the planes are already separated by colour, so a
         // reader that debayered them would be debayering three images that have
         // each already been demosaiced by the stacking.
         bayer_pattern: None,
         notes: vec![
-            format!("pedestal restored: {pedestal:?} ADU per plane"),
+            format!("pedestal restored: {:?} ADU per plane", stacked.pedestal),
             format!("drizzle pixfrac {}", args.pixfrac),
             "NaN where no frame covered the pixel".to_owned(),
         ],
     };
 
     let mut written = Vec::new();
-    let borrowed: Vec<&[f32]> = planes.iter().map(|plane| plane.as_slice()).collect();
+    let borrowed: Vec<&[f32]> = stacked.planes.iter().map(|plane| plane.as_slice()).collect();
     let target = args.out.join("stack.fits");
-    fits::write_planes(&target, &borrowed, canvas.width, canvas.height, &header)
+    fits::write_planes(&target, &borrowed, width, height, &header)
         .with_context(|| format!("writing {}", target.display()))?;
     written.push(target);
 
-    // White balance goes on the TIFF and never on the FITS. A raw green
-    // photosite collects roughly twice what a red or blue one does from the same
-    // white light, so an unbalanced stack is violently green — true, and useless
-    // to look at. The FITS keeps the sensor's own numbers because that is the
-    // measurement; the TIFF exists to be looked at, and says in its description
-    // what was applied.
-    let (balanced, multipliers, balance) = white_balance(planes, &first.read.layout, mosaic);
-    let shown: Vec<&[f32]> = balanced.iter().map(|plane| plane.as_slice()).collect();
-    // The pedestal was measured before the balance and has to move with it, or
-    // the levelling below would subtract the wrong sky.
-    let pedestal: Vec<f64> = pedestal
-        .iter()
-        .enumerate()
-        .map(|(colour, level)| level * f64::from(multipliers.get(colour).copied().unwrap_or(1.0)))
-        .collect();
-    let pedestal = &pedestal[..];
-
-    // Full scale is the brightest thing the stack actually holds, rather than a
-    // round number the data would clip against.
-    let mut full = 0f32;
-    for plane in &shown {
-        for value in *plane {
-            if value.is_finite() && *value > full {
-                full = *value;
-            }
-        }
-    }
-    let image = tiff::Image {
-        width: canvas.width,
-        height: canvas.height,
-        planes: &shown[..mosaic.colours.min(3)],
-    };
+    // Linear, white balanced, background left where it is: this copy is meant
+    // to be handed to another program, and the description says how to undo it.
+    let linear = view::for_viewing(stacked, &first.read.layout, &mosaic, false);
+    let planes: Vec<&[f32]> = linear.planes.iter().map(|plane| plane.as_slice()).collect();
+    let image =
+        tiff::Image { width, height, planes: &planes[..mosaic.colours.min(3)] };
     let target = args.out.join("stack.tif");
-    tiff::write(&target, &image, &tiff::Mapping::Linear { full }, &balance)
+    tiff::write(&target, &image, &tiff::Mapping::Linear { full: linear.full }, &linear.note)
         .with_context(|| format!("writing {}", target.display()))?;
     written.push(target);
 
     if args.stretch {
-        // The viewing copy also has its background levelled between the
-        // channels, which the linear one deliberately does not. The sky is not
-        // a white source - light pollution is orange and airglow is green - so
-        // a white balance taken from daylight leaves it coloured, and a single
-        // black point across three coloured skies renders the whole frame in
-        // whichever channel sits highest above it. Levelling is a decision
-        // about how to look at the picture, not a measurement, so it goes only
-        // in the file that says it is not to be measured from.
-        let (levelled, common) = level_background(&balanced, pedestal, mosaic);
-        // A little below the sky rather than exactly on it. Put the black point
-        // on the sky and half the noise clips to zero, which reads as a clean
-        // background but has thrown away the faintest half of everything. The
-        // percentile is taken from the data so it follows the run rather than a
-        // number chosen once.
-        let floor = percentile(&levelled[mosaic.dominant], 0.02).min(common);
-        let shown: Vec<&[f32]> = levelled.iter().map(|plane| plane.as_slice()).collect();
+        let levelled = view::for_viewing(stacked, &first.read.layout, &mosaic, true);
+        let planes: Vec<&[f32]> = levelled.planes.iter().map(|plane| plane.as_slice()).collect();
+        // A little below the sky rather than exactly on it: on it, half the
+        // noise clips to zero, which reads as a clean background but has thrown
+        // away the faintest half of everything.
+        let floor = view::percentile(&levelled.planes[mosaic.dominant], 0.02).min(levelled.common);
         let target = args.out.join("stack_view.tif");
         tiff::write(
             &target,
-            &tiff::Image {
-                width: canvas.width,
-                height: canvas.height,
-                planes: &shown[..mosaic.colours.min(3)],
-            },
-            &tiff::Mapping::Asinh { black: floor, white: full, softening: 200.0 },
-            "astro-stacker stack, white balanced and its background levelled between the \
-             channels, then stretched. For viewing only.",
+            &tiff::Image { width, height, planes: &planes[..mosaic.colours.min(3)] },
+            &tiff::Mapping::Asinh { black: floor, white: levelled.full, softening: 200.0 },
+            &levelled.note,
         )
         .with_context(|| format!("writing {}", target.display()))?;
         written.push(target);
     }
     Ok(written)
-}
-
-/// The planes with the camera's as-shot white balance applied, and a sentence
-/// saying what was done.
-///
-/// Gauged on the dominant colour so green is left alone and the other two are
-/// lifted to meet it: that keeps the numbers near the ones in the FITS, and it
-/// is the multiplier the camera itself recorded rather than one chosen to make
-/// the picture look right.
-fn white_balance(
-    planes: &[Vec<f32>],
-    layout: &astro_core::ImageLayout,
-    mosaic: &Mosaic,
-) -> (Vec<Vec<f32>>, Vec<f32>, String) {
-    let gauge = layout.wb_coeffs.get(mosaic.dominant).copied().unwrap_or(f32::NAN);
-    let usable = gauge.is_finite()
-        && gauge > 0.0
-        && (0..mosaic.colours)
-            .all(|c| layout.wb_coeffs.get(c).is_some_and(|v| v.is_finite() && *v > 0.0));
-    if !usable {
-        // Not recorded, so nothing is applied and nothing is invented. A green
-        // picture that says why beats a neutral one built on a guess.
-        return (
-            planes.to_vec(),
-            vec![1.0; planes.len()],
-            "astro-stacker stack. The camera recorded no white balance, so none was applied \
-             and the raw green cast is the sensor's own."
-                .to_owned(),
-        );
-    }
-
-    let multipliers: Vec<f32> =
-        (0..planes.len()).map(|c| layout.wb_coeffs[c.min(3)] / gauge).collect();
-    let balanced = planes
-        .iter()
-        .zip(&multipliers)
-        .map(|(plane, gain)| plane.iter().map(|value| value * gain).collect())
-        .collect();
-    let listed: Vec<String> = multipliers.iter().map(|m| format!("{m:.3}")).collect();
-    (
-        balanced,
-        multipliers,
-        format!(
-            "astro-stacker stack, with the camera's as-shot white balance applied \
-             ({}). The FITS beside it has not been balanced.",
-            listed.join(", ")
-        ),
-    )
-}
-
-/// One quantile of a plane, from a sample: the exact answer would mean sorting
-/// forty million values to choose a black point.
-fn percentile(plane: &[f32], fraction: f64) -> f32 {
-    let mut sample: Vec<f32> =
-        plane.iter().copied().step_by(97).filter(|value| value.is_finite()).collect();
-    if sample.is_empty() {
-        return 0.0;
-    }
-    sample.sort_by(f32::total_cmp);
-    sample[((sample.len() - 1) as f64 * fraction) as usize]
-}
-
-/// Every channel's sky moved to one level, so the background is grey and the
-/// stars keep their colours.
-///
-/// Returns the level everything was moved to, which is where a stretch must put
-/// its black point.
-fn level_background(
-    planes: &[Vec<f32>],
-    pedestal: &[f64],
-    mosaic: &Mosaic,
-) -> (Vec<Vec<f32>>, f32) {
-    // Green is left where it is and the others are brought to meet it, so the
-    // numbers stay near the ones in the FITS.
-    let common = pedestal.get(mosaic.dominant).copied().unwrap_or(0.0) as f32;
-    let levelled = planes
-        .iter()
-        .enumerate()
-        .map(|(colour, plane)| {
-            let own = pedestal.get(colour).copied().unwrap_or(0.0) as f32;
-            plane.iter().map(|value| value - own + common).collect()
-        })
-        .collect();
-    (levelled, common)
-}
-
-/// The middle of the star field, standing in for the middle of the frame.
-fn centre_of(stars: &[astro_core::stars::Star]) -> (f64, f64) {
-    if stars.is_empty() {
-        return (0.0, 0.0);
-    }
-    let mut xs: Vec<f64> = stars.iter().map(|star| star.x).collect();
-    let mut ys: Vec<f64> = stars.iter().map(|star| star.y).collect();
-    xs.sort_by(f64::total_cmp);
-    ys.sort_by(f64::total_cmp);
-    ((xs[0] + xs[xs.len() - 1]) / 2.0, (ys[0] + ys[ys.len() - 1]) / 2.0)
 }
