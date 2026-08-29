@@ -304,37 +304,45 @@ conventional thing to do, silently throws away good extended-structure signal.
 
 ### Kappa-sigma rejection does not transfer from calibration frames to lights
 
-Not yet built, and deliberately so. Every dark of a set has the same expectation
-at every pixel, which is what makes a clip around the mean sound. Lights do not:
-the trailing on this session runs from 0.18 to 16.23 photosites, so the same
-star has a 25:1 range of peak brightness across the run, and a 3-sigma clip
-rejects the sharp frames in the trail wings and the trailed frames at the core.
-The per-frame noise also spans 7.8:1, so a clip against one pooled sigma cuts
-the noisy frames at their own 1.5 sigma and throws away up to 65% of legitimate
-samples.
+Every dark of a set has the same expectation at every pixel, which is what makes
+a clip around the mean a test of the noise. Lights do not: a star's peak
+brightness goes as the reciprocal of the product of its two PSF axes, so across
+a run whose trailing spans 0.18 to 16.23 photosites the same star legitimately
+differs between frames by far more than their noise. The per-frame noise on this
+session also spans a factor of 7.8, so one pooled sigma cuts the noisiest frames
+well inside their own noise.
 
-What will be built instead: clipping studentised per sample against each frame's
-own measured noise, and only where the local gradient is small -- which is where
-a satellite trail spends almost all of its length, and where the PSF differences
-that break the naive scheme do not exist.
+Rejection is therefore optional — it costs a second decoding pass — and when
+asked for it works on three rules, each of which was arrived at by a test that
+failed:
 
-### The window carries structure across the bridge, never sentences
+**Each sample is judged against its own frame's noise.** The frames of one night
+do not share a variance; that is the whole reason they are weighted.
 
-A `Mismatch` reaches the interface as its kind and its numbers, not as the
-string the command line prints. The command line says its piece in English; the
-window says the same thing in whatever language the user picked, and one shared
-string would force one of them to be wrong. The English rendering travels
-alongside as a fallback for a finding the interface has no words for yet —
-visibly English on screen, so it reads as a gap rather than as a translation,
-and a test over the reference session fails if a mismatch kind appears that the
-interface cannot name.
+**Each sample is compared against the mean of the others**, got by subtracting
+its own contribution from the first pass, which is exact and costs one
+subtraction. Against the plain mean a bright enough streak lifts the average it
+is measured against and is protected by its own brightness.
 
-Nothing is decided in the shell. It opens files, calls the core and serialises
-the answer. The first time that rule was tested it failed immediately: the shell
-rendered `partition.plans` in order, and set order is arbitrary, so the session
-on screen was a two-frame set left over from framing. The fix was not to sort in
-the shell — the command line already had that rule — but to move the ranking
-into `Partition::plans_by_depth`, where both callers reach it.
+**Whether there is structure here is a different question from whether this
+sample is an outlier, and takes a different statistic.** Structure belongs to
+the scene, so the gate reads every frame; reading it off the mean of the others
+lets a star's skirt slip under the ceiling exactly when the brightest frame is
+the one being tested. The region above the ceiling is grown by a margin, because
+a star's wings belong to the star, and the threshold carries a term proportional
+to the local signal, because the same flux spread over different areas by
+different sharpness makes frames disagree there by a share of what is present.
+On empty sky that term is zero, which is where satellites are caught.
+
+Measured on the reference session: a satellite trail and the frame-to-frame
+particle hits are removed, faint stars beside them are untouched to the ADU, and
+0.310% of samples go — of which the Gaussian tail at three sigma is 0.27%. Two
+passes over 219 frames take 79 s.
+
+The counters here were once atomic increments per deposit. A run of this size
+makes 15.8 billion of them, and the threads fought over one cache line for
+twenty times longer than the work itself took. They are counted per band and
+added once.
 
 ## Layout
 
