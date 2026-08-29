@@ -88,7 +88,7 @@ const ru = {
   starting: "Готовлюсь…",
   buildingMaster: "Мастер-{kind}: {done} из {total}",
   measuringFrame: "Кадр {done} из {total} — {name}",
-  measureSlow: "Каждый кадр декодируется, калибруется и просматривается на звёзды. Для 226 кадров это около двух с половиной минут.",
+  measureSlow: "Каждый кадр декодируется, калибруется и просматривается на звёзды. Считай примерно полсекунды на кадр — прогон в пару сотен займёт минуты.",
   stoppedEarly: "Остановлено: измерено {n} кадров, это часть прогона, а не весь он.",
 
   runAsWhole: "Прогон целиком",
@@ -229,7 +229,7 @@ const en: Record<Keys, string> = {
   starting: "Getting ready…",
   buildingMaster: "Master {kind}: {done} of {total}",
   measuringFrame: "Frame {done} of {total} — {name}",
-  measureSlow: "Every frame is decoded, calibrated and searched for stars. For 226 frames that is about two and a half minutes.",
+  measureSlow: "Every frame is decoded, calibrated and searched for stars. Reckon on about half a second each, so a run of a couple of hundred takes minutes.",
   stoppedEarly: "Stopped: {n} frames measured, which is part of a run and not the whole of one.",
 
   runAsWhole: "The run as a whole",
