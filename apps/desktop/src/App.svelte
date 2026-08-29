@@ -77,9 +77,19 @@
   };
 
   let step = $state<Step>("frames");
-  let theme = $state<"dark" | "light">(
-    (localStorage.getItem("theme") as "dark" | "light") ?? "dark",
+  // Три состояния, как у соседних проектов, и системное среди них: без него
+  // человек со светлой системой получает тёмное окно и решает, что выбора нет.
+  // Код ниже совпадает с ними построчно - см. ответ про общую папку.
+  type Theme = "system" | "dark" | "light";
+  const saved = localStorage.getItem("theme");
+  let theme = $state<Theme>(
+    saved === "light" || saved === "dark" || saved === "system" ? saved : "system",
   );
+  const THEME_KEYS = {
+    system: "themeSystem",
+    dark: "themeDark",
+    light: "themeLight",
+  } as const;
   let aboutOpen = $state(false);
   let version = $state("");
   let formats = $state<string[]>([]);
@@ -101,7 +111,9 @@
   const chosen = $derived(Object.values(roots).some((paths) => paths.length > 0));
 
   $effect(() => {
-    document.documentElement.dataset.theme = theme;
+    const root = document.documentElement;
+    if (theme === "system") delete root.dataset.theme;
+    else root.dataset.theme = theme;
     localStorage.setItem("theme", theme);
   });
 
@@ -303,8 +315,12 @@
     {/each}
 
     <div class="railfoot">
-      <button class="ghost" onclick={() => (theme = theme === "dark" ? "light" : "dark")}>
-        {i18n.t(theme === "dark" ? "themeDark" : "themeLight")}
+      <button
+        class="ghost"
+        onclick={() =>
+          (theme = theme === "system" ? "dark" : theme === "dark" ? "light" : "system")}
+      >
+        {i18n.t(THEME_KEYS[theme])}
       </button>
       <button class="ghost" onclick={() => (aboutOpen = true)}>{i18n.t("about")}</button>
       <label>

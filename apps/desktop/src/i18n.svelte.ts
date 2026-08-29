@@ -94,8 +94,9 @@ const ru = {
   rejected: "Не прочитаны",
 
   theme: "Тема",
-  themeDark: "Тёмная",
-  themeLight: "Светлая",
+  themeSystem: "Тема: системная",
+  themeDark: "Тема: тёмная",
+  themeLight: "Тема: светлая",
   language: "Язык",
   about: "О программе",
   aboutText:
@@ -195,8 +196,9 @@ const en: Record<Keys, string> = {
   rejected: "Not read",
 
   theme: "Theme",
-  themeDark: "Dark",
-  themeLight: "Light",
+  themeSystem: "Theme: system",
+  themeDark: "Theme: dark",
+  themeLight: "Theme: light",
   language: "Language",
   about: "About",
   aboutText:

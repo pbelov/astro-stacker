@@ -38,6 +38,32 @@
   --gap: 12px;
 }
 
+/* Системная тема = отсутствие data-theme, решает prefers-color-scheme. Три
+   блока, а не два: без среднего пользователь со светлой системой получает
+   тёмное окно и решает, что переключателя нет. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f4f5f9;
+    --surface: #ffffff;
+    --raised: #f8f9fc;
+    --chipbg: #e3e7f2;
+    --line: #d5dbea;
+    --text: #1c2336;
+    --muted: #59627c;
+    --dim: #8a92a8;
+    --faint: #a6adc2;
+    --accent: #8a6a1f;
+    --accent-contrast: #ffffff;
+    --err: #b0392a;
+    --err-bg: #fdeeec;
+    --warn: #8a6410;
+    --warn-bg: #fdf5e4;
+    --ok: #23784c;
+    --ok-bg: #eaf6f0;
+    --photo-bg: #0b0d14;
+  }
+}
+
 :root[data-theme="light"] {
   --bg: #f4f5f9;
   --surface: #ffffff;
