@@ -28,17 +28,7 @@ pub struct MasterArgs {
     pub resident_mb: Option<u64>,
 }
 
-/// The three masters a light needs, each `None` where nothing was matched.
-///
-/// `None` rather than a master of ones, because applying nothing and applying
-/// an identity are indistinguishable in the pixels and must not be
-/// indistinguishable in the report.
-#[derive(Debug, Default)]
-pub struct MasterSet {
-    pub bias: Option<Master>,
-    pub dark: Option<Master>,
-    pub flat: Option<Master>,
-}
+pub use astro_core::pipeline::MasterSet;
 
 pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result<()> {
     let (options, tolerances) = options_from(&args.scan, matches)?;

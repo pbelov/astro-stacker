@@ -5,12 +5,13 @@
   import { onDestroy, onMount } from "svelte";
 
   import DropZone from "./ui/DropZone.svelte";
+  import Quality from "./Quality.svelte";
   import { i18n, LOCALES, type Locale } from "./i18n.svelte";
 
   type Step = "frames" | "quality" | "stack";
   const STEPS: { id: Step; key: "stepFrames" | "stepQuality" | "stepStack"; ready: boolean }[] = [
     { id: "frames", key: "stepFrames", ready: true },
-    { id: "quality", key: "stepQuality", ready: false },
+    { id: "quality", key: "stepQuality", ready: true },
     { id: "stack", key: "stepStack", ready: false },
   ];
 
@@ -306,7 +307,7 @@
       <button
         class="step"
         class:active={step === s.id}
-        disabled={!s.ready}
+        disabled={!s.ready || (s.id !== "frames" && !chosen)}
         onclick={() => (step = s.id)}
       >
         {i18n.t(s.key)}
@@ -493,6 +494,8 @@
           </section>
         {/if}
       {/if}
+    {:else if step === "quality"}
+      <Quality {roots} {kindName} {trim} />
     {/if}
   </main>
 </div>

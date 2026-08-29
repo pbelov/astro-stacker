@@ -368,7 +368,7 @@ fn report_selection(chosen: &[Chosen], refused: &[(String, String)], args: &Stac
 
 fn combine(
     host: &PluginHost,
-    survey: &crate::survey::Survey,
+    survey: &crate::survey::Read,
     chosen: &[Chosen],
     args: &StackArgs,
 ) -> Result<Vec<PathBuf>> {

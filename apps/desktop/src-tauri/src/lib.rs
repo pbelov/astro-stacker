@@ -16,12 +16,18 @@
 //! behind a window would be the copy that drifts.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use astro_core::pipeline::{Flow, Step};
+use astro_core::stars::DetectOptions;
 use astro_core::session::{
     CalibrationMatch, FrameId, FrameKind, FrameRole, Incompatibility, MatchQuality, Mismatch,
     Partition, RoleRule, ScanOptions, ScanReport, Session, Severity, Suspicion, Tolerances,
 };
 use astro_core::{PluginHost, default_plugin_dirs};
+use tauri::State;
+use tauri::ipc::Channel;
 use serde::{Deserialize, Serialize};
 
 /// What the user pointed the window at.
@@ -192,6 +198,66 @@ fn development_dirs() -> Vec<PathBuf> {
     Vec::new()
 }
 
+/// What a running pass reports back while it runs.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "stage")]
+pub enum Progress {
+    /// Building one of the masters. These come first and take about a third of
+    /// the time, so a bar that only counted lights would sit at zero through
+    /// them and read as a hang.
+    Master { kind: String, done: usize, total: usize },
+    Frame { done: usize, total: usize, name: String },
+}
+
+/// One light, measured.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameQualityDto {
+    pub name: String,
+    pub stars: usize,
+    /// Photosites across the trail: the seeing and the focus.
+    pub fwhm: f64,
+    /// How much longer than wide the stars are: what the mount did.
+    pub trail: f64,
+    /// Degrees, in [0, 180). NaN where the stars were round enough to have no
+    /// direction, which is not the same as pointing at zero.
+    pub angle: f64,
+    pub agreement: f64,
+    pub sky: f64,
+    pub noise: f64,
+    pub saturated: usize,
+    pub oversized: usize,
+    pub seconds: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityDto {
+    pub frames: Vec<FrameQualityDto>,
+    pub failed: Vec<RejectedDto>,
+    pub seconds: f64,
+    /// True when the user stopped it: `frames` then holds part of a run and
+    /// must not be read as the whole of one.
+    pub stopped: bool,
+    /// Where the run as a whole is trailed, in degrees, and how consistently.
+    ///
+    /// Aggregated in the core as a spin-2 quantity. An ellipse at 179 degrees
+    /// and one at 1 point almost the same way and their arithmetic mean is 90,
+    /// perpendicular to both, so this cannot be computed by averaging the
+    /// per-frame angles the window was sent.
+    pub direction: f64,
+    pub direction_agreement: f64,
+    /// How many stars were kept per frame, and whether that was a ceiling
+    /// rather than a count.
+    pub star_cap: usize,
+}
+
+/// Set while a pass runs, cleared when it ends.
+#[derive(Default)]
+pub struct Running {
+    cancel: Arc<AtomicBool>,
+}
+
 fn host() -> Result<PluginHost, String> {
     let mut host = PluginHost::new();
     let mut failures = Vec::new();
@@ -226,6 +292,149 @@ fn scan_session(roots: Roots) -> Result<SessionDto, String> {
     let report = astro_core::session::scan(&host, &options).map_err(|error| format!("{error:#}"))?;
     let partition = report.session.partition(&Tolerances::default());
     Ok(describe(&report, &partition))
+}
+
+#[tauri::command]
+fn cancel(state: State<'_, Running>) {
+    state.cancel.store(true, Ordering::Relaxed);
+}
+
+/// Reads the run and measures every light: stars, width, trailing.
+///
+/// This is the slow one — about 140 seconds for 226 frames of 19 megapixels on
+/// the reference machine — so it reports as it goes and can be stopped. A
+/// stopped pass returns what it measured rather than nothing, and says that it
+/// was stopped.
+#[tauri::command]
+async fn measure_quality(
+    roots: Roots,
+    sigma: f32,
+    max_stars: usize,
+    raw: bool,
+    on: Channel<Progress>,
+    state: State<'_, Running>,
+) -> Result<QualityDto, String> {
+    let rules = roots.rules();
+    if rules.is_empty() {
+        return Err("nothing to measure".to_owned());
+    }
+    let cancel = state.cancel.clone();
+    cancel.store(false, Ordering::Relaxed);
+
+    let host = host()?;
+    let options = ScanOptions { rules, ..Default::default() };
+    let report = astro_core::session::scan(&host, &options).map_err(|error| format!("{error:#}"))?;
+    let partition = report.session.partition(&Tolerances::default());
+    let session = &report.session;
+
+    // The deepest plan, from the core's own ranking, for the same reason the
+    // frames step shows it first: set order is arbitrary.
+    let ranked = partition.plans_by_depth(session);
+    let Some(&(plan, _)) = ranked.first() else {
+        return Err("no stackable set of lights was formed, so there is nothing to measure"
+            .to_owned());
+    };
+    let Some(lights) = partition.set(plan.lights) else {
+        return Err("the deepest plan names a set that is not in the partition".to_owned());
+    };
+
+    let stopped = || cancel.load(Ordering::Relaxed);
+    let masters = if raw {
+        astro_core::pipeline::MasterSet::default()
+    } else {
+        let report = |step: Step<'_>| {
+            if let Step::MasterReading { kind, done, total, .. } = step {
+                let _ = on.send(Progress::Master { kind: kind.name().to_owned(), done, total });
+            }
+            if stopped() { Flow::Stop } else { Flow::Continue }
+        };
+        match astro_core::pipeline::masters(
+            &host,
+            session,
+            &partition,
+            plan,
+            &Default::default(),
+            &report,
+        ) {
+            Ok(masters) => masters,
+            Err(astro_core::Error::Cancelled) => return Err("cancelled".to_owned()),
+            Err(error) => return Err(format!("{error:#}")),
+        }
+    };
+
+    let ids: Vec<FrameId> =
+        lights.members.iter().copied().filter(|id| session[*id].is_active()).collect();
+    let detect = DetectOptions { detect_sigma: sigma, max_stars, ..Default::default() };
+    let survey = astro_core::pipeline::survey(&host, session, &ids, &masters, &detect, &|step| {
+        if let Step::FrameRead { done, total, name } = step {
+            let _ = on.send(Progress::Frame { done, total, name: name.to_owned() });
+        }
+        if stopped() { Flow::Stop } else { Flow::Continue }
+    });
+
+    Ok(quality(&survey, max_stars))
+}
+
+fn quality(survey: &astro_core::pipeline::Survey, star_cap: usize) -> QualityDto {
+    let frames: Vec<FrameQualityDto> = survey
+        .frames
+        .iter()
+        .map(|measured| {
+            let shape = &measured.detection.shape;
+            FrameQualityDto {
+                name: measured.name.clone(),
+                stars: measured.detection.stars.len(),
+                fwhm: shape.moments.minor_fwhm(),
+                trail: shape.moments.trail(),
+                angle: shape.moments.angle_degrees(),
+                agreement: shape.direction_agreement,
+                sky: f64::from(shape.sky),
+                noise: f64::from(shape.noise),
+                saturated: measured.detection.saturated,
+                oversized: measured.detection.oversized,
+                seconds: measured.seconds,
+            }
+        })
+        .collect();
+
+    // Spin-2 across the run, weighted by how trailed each frame is: a round
+    // frame has no direction to contribute and must not dilute the answer
+    // toward zero.
+    let (mut cos, mut sin, mut weight) = (0f64, 0f64, 0f64);
+    for measured in &survey.frames {
+        let moments = measured.detection.shape.moments;
+        if let Some((c, s)) = moments.orientation() {
+            let trail = moments.trail();
+            if trail.is_finite() && trail > 0.0 {
+                cos += c * trail;
+                sin += s * trail;
+                weight += trail;
+            }
+        }
+    }
+    let (direction, direction_agreement) = if weight > 0.0 {
+        let degrees = sin.atan2(cos).to_degrees() / 2.0;
+        (
+            if degrees < 0.0 { degrees + 180.0 } else { degrees },
+            (cos * cos + sin * sin).sqrt() / weight,
+        )
+    } else {
+        (f64::NAN, f64::NAN)
+    };
+
+    QualityDto {
+        frames,
+        failed: survey
+            .failed
+            .iter()
+            .map(|(name, reason)| RejectedDto { name: name.clone(), reason: reason.clone() })
+            .collect(),
+        seconds: survey.seconds,
+        stopped: survey.stopped,
+        direction,
+        direction_agreement,
+        star_cap,
+    }
 }
 
 #[tauri::command]
@@ -483,7 +692,14 @@ fn frame(session: &Session, id: FrameId) -> FrameDto {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![scan_session, app_version, formats])
+        .manage(Running::default())
+        .invoke_handler(tauri::generate_handler![
+            scan_session,
+            measure_quality,
+            cancel,
+            app_version,
+            formats
+        ])
         .run(tauri::generate_context!())
         .expect("error while running astro-stacker");
 }
@@ -546,6 +762,84 @@ mod tests {
                     found.english
                 );
             }
+        }
+    }
+
+    #[test]
+    fn measuring_a_real_run_reports_what_the_command_line_reports() {
+        // The window and the command line must not disagree about the same
+        // night. These are the numbers `stars` prints for this session, and if
+        // the bridge ever computes its own the two would drift apart in a way
+        // only the owner would notice, and only after acting on one of them.
+        let Some(root) = testdata() else { return };
+        let host = host().expect("a plugin loads");
+        let options = ScanOptions {
+            rules: vec![
+                RoleRule::new(root.join("lights"), Some(FrameKind::Light)),
+                RoleRule::new(root.join("darks"), Some(FrameKind::Dark)),
+                RoleRule::new(root.join("flats56_iso100-1"), Some(FrameKind::Flat)),
+                RoleRule::new(root.join("bias"), Some(FrameKind::Bias)),
+            ],
+            ..Default::default()
+        };
+        let report = astro_core::session::scan(&host, &options).expect("the session scans");
+        let partition = report.session.partition(&Tolerances::default());
+        let session = &report.session;
+
+        let (plan, _) = partition.plans_by_depth(session)[0];
+        let lights = partition.set(plan.lights).expect("the deepest plan has its set");
+        // Six frames, not the whole night: the point is that the numbers match,
+        // and two and a half minutes of decoding would not make them match
+        // harder.
+        let ids: Vec<FrameId> = lights
+            .members
+            .iter()
+            .copied()
+            .filter(|id| session[*id].is_active())
+            .take(6)
+            .collect();
+
+        let masters = astro_core::pipeline::masters(
+            &host,
+            session,
+            &partition,
+            plan,
+            &Default::default(),
+            &|_| Flow::Continue,
+        )
+        .expect("the masters build");
+        let survey = astro_core::pipeline::survey(
+            &host,
+            session,
+            &ids,
+            &masters,
+            &DetectOptions::default(),
+            &|_| Flow::Continue,
+        );
+
+        let dto = quality(&survey, DetectOptions::default().max_stars);
+        assert_eq!(dto.frames.len(), 6, "six frames measured");
+        assert!(!dto.stopped);
+
+        // The command line reports 2.07 px across the trail at the median and
+        // 92 degrees of direction over these frames.
+        let mut widths: Vec<f64> = dto.frames.iter().map(|f| f.fwhm).collect();
+        widths.sort_by(f64::total_cmp);
+        let median = widths[widths.len() / 2];
+        assert!((median - 2.07).abs() < 0.2, "width across the trail: {median}");
+        assert!(
+            (dto.direction - 92.0).abs() < 6.0,
+            "the run trails at 92 degrees, not {}",
+            dto.direction
+        );
+        assert!(
+            dto.direction_agreement > 0.8,
+            "one direction in every frame: {}",
+            dto.direction_agreement
+        );
+        for frame in &dto.frames {
+            assert!(frame.stars > 0, "{} found no stars", frame.name);
+            assert!(frame.trail.is_finite(), "{} has no trail", frame.name);
         }
     }
 

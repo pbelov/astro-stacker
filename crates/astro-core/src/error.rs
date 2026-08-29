@@ -53,6 +53,19 @@ pub enum Error {
     #[error("path {path} is not valid UTF-8, which plugins require")]
     NonUtf8Path { path: PathBuf },
 
+    /// The caller asked the pass to stop.
+    #[error("cancelled")]
+    Cancelled,
+
+    /// A frame that decoded but cannot be measured, with the reason.
+    ///
+    /// Separate from a decode failure because it is not the plugin's fault and
+    /// not the file's: a frame of one repeated value has no noise to threshold
+    /// against, and the honest answer is to name it and carry on with the rest
+    /// of the night.
+    #[error("{name}: {reason}")]
+    Unmeasurable { name: String, reason: String },
+
     /// A set with no active frames, or a frame whose layout describes nothing.
     #[error("there is nothing to combine")]
     NothingToCombine,

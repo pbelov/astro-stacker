@@ -1,26 +1,18 @@
-//! Reading a run once: calibrate every light, find its stars, measure its
-//! shape.
+//! Reading a run, with the command line's own reporting around it.
 //!
-//! Three commands need exactly this and nothing else before they can start —
-//! `stars` reports the shapes, `register` matches the star lists, and `stack`
-//! needs both — and the pass costs about 140 seconds of decoding for this
-//! project's reference session. Having it written once means the three cannot
-//! drift apart on what "calibrated" means, which is the failure that matters
-//! here: a `stack` that applied the flat slightly differently from the `stars`
-//! that chose which frames to stack would be measuring one thing and combining
-//! another.
+//! The pass itself lives in `astro_core::pipeline`, because the window needs
+//! exactly the same answer and a second copy of it would be the copy that
+//! drifts. What is left here is the argument group and the lines it prints.
 
-use std::time::Instant;
-
-use anyhow::{Context, Result, bail};
-use astro_core::calibrate::apply;
-use astro_core::session::{FrameId, Session};
-use astro_core::stars::{Detection, DetectOptions, detect};
-use astro_core::{ImageLayout, PluginHost, Samples};
+use anyhow::{Result, bail};
+use astro_core::PluginHost;
+use astro_core::calibrate::Method;
+pub use astro_core::pipeline::{Flow, MasterSet, Step, Survey};
+use astro_core::session::FrameId;
+use astro_core::stars::DetectOptions;
 use clap::{ArgMatches, Args};
 
 use crate::format;
-use crate::master_command::{MasterSet, build_masters};
 use crate::scan_command::{ScanArgs, options_from};
 
 /// The options every command that reads a run shares.
@@ -60,33 +52,20 @@ pub struct SurveyArgs {
     pub max_footprint: usize,
 }
 
-/// One light, read and measured.
-///
-/// Deliberately does NOT hold the pixels. A run of 225 frames is 16 GiB of them
-/// and the budget is 8, so stacking decodes a second time; what is kept here is
-/// only what is small and would otherwise have to be measured twice.
-pub struct Surveyed {
-    pub name: String,
-    pub path: std::path::PathBuf,
-    pub layout: ImageLayout,
-    pub camera_model: String,
-    pub exposure_seconds: Option<f64>,
-    pub iso: Option<f64>,
-    pub detection: Detection,
-    pub seconds: f64,
+pub use astro_core::pipeline::Measured as Surveyed;
+
+/// A run, read, with the masters it was calibrated with.
+pub struct Read {
+    pub survey: Survey,
+    pub masters: MasterSet,
 }
 
-/// A whole run, read.
-pub struct Survey {
-    pub frames: Vec<Surveyed>,
-    /// The masters the lights were calibrated with, so a second pass applies
-    /// exactly the same ones rather than rebuilding them.
-    pub masters: MasterSet,
-    /// Frames that were selected but could not be read, with the reason.
-    /// Carried rather than only printed to stderr: a command that says "225 of
-    /// 226" has to be able to name the missing one in the same report.
-    pub failed: Vec<(String, String)>,
-    pub seconds: f64,
+impl std::ops::Deref for Read {
+    type Target = Survey;
+
+    fn deref(&self) -> &Survey {
+        &self.survey
+    }
 }
 
 /// Reads a run: scans, builds masters, then calibrates and measures every
@@ -96,7 +75,7 @@ pub fn read(
     scan: &ScanArgs,
     matches: &ArgMatches,
     args: &SurveyArgs,
-) -> Result<Survey> {
+) -> Result<Read> {
     if args.step == 0 {
         bail!("--step 0 would read no frames");
     }
@@ -108,30 +87,26 @@ pub fn read(
     chosen.announce(&report.session);
     let (plan, lights) = (chosen.plan, chosen.lights);
 
-    let mut notes = Vec::new();
     // Masters are built in memory and never written here. A command that reads
     // a run to report numbers should not quietly fill a directory with
     // gigabytes of FITS; `master` exists for when that is what was wanted.
     let masters = if args.raw {
-        notes.push("detecting on raw frames: hot photosites will be counted as stars".to_owned());
+        println!("note: detecting on raw frames, so hot photosites will be counted as stars");
         MasterSet::default()
     } else {
-        build_masters(
+        astro_core::pipeline::masters(
             host,
             &report.session,
             &partition,
             plan,
             &Default::default(),
-            &std::env::temp_dir(),
-            false,
-            scan.quiet,
+            &|step| announce(step, scan.quiet),
         )?
     };
     if !args.raw && masters.dark.is_none() {
-        notes.push(
-            "no master dark was matched, so hot photosites will be counted as stars - \
+        println!(
+            "note: no master dark was matched, so hot photosites will be counted as stars - \
              --raw says so on purpose, and this is the same thing by accident"
-                .to_owned(),
         );
     }
 
@@ -154,76 +129,64 @@ pub fn read(
         max_footprint: args.max_footprint,
         ..Default::default()
     };
-    for note in &notes {
-        println!("note: {note}");
-    }
     println!("\nreading {}", format::plural(selected.len(), "light"));
 
-    let started = Instant::now();
-    let mut frames = Vec::with_capacity(selected.len());
-    let mut failed = Vec::new();
-    for id in selected {
-        match read_one(host, &report.session, id, &masters, &detect_options) {
-            Ok(frame) => frames.push(frame),
-            // One unreadable frame in a night of two hundred must not lose the
-            // other hundred and ninety-nine, and must not pass unmentioned
-            // either.
-            Err(error) => {
-                let name = report
-                    .session
-                    .path(id)
-                    .and_then(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
-                    .unwrap_or_else(|| format!("frame {}", id.index()));
-                failed.push((name, format!("{error:#}")));
+    let survey = astro_core::pipeline::survey(
+        host,
+        &report.session,
+        &selected,
+        &masters,
+        &detect_options,
+        &|step| announce(step, scan.quiet),
+    );
+    if !scan.quiet {
+        eprint!("\r                                        \r");
+    }
+    if survey.frames.is_empty() {
+        bail!("no frame could be read");
+    }
+    Ok(Read { survey, masters })
+}
+
+/// One line, rewritten in place. A master from 85 frames is two passes and
+/// about half a minute, and a run of 226 lights is over two: silence for that
+/// long reads as a hang.
+fn announce(step: Step<'_>, quiet: bool) -> Flow {
+    match step {
+        Step::MasterMissing { kind } => {
+            println!("{:<10} nothing matched, nothing built", kind.name())
+        }
+        Step::MasterReading { done, total, .. } => {
+            if !quiet {
+                eprint!("\r  reading {done} of {total}");
+            }
+        }
+        Step::MasterBuilt { kind, master, seconds } => {
+            if !quiet {
+                eprint!("\r                                        \r");
+            }
+            println!();
+            println!("{} from {}", kind.name(), format::plural(master.frames, "frame"));
+            println!(
+                "  combined   {} of {}, {} in {seconds:.1}s",
+                master.method.name(),
+                format::plural(master.frames, "frame"),
+                if master.resident { "all held at once" } else { "streamed in two passes" }
+            );
+            // A healthy rejection is a fraction of a per cent. Whole
+            // percentages mean either the threshold is wrong or the frames
+            // disagree with each other, and both are the user's business.
+            if matches!(master.method, Method::ClippedMean) {
+                println!("  rejected   {:.4}% of samples", master.rejected_fraction() * 100.0);
+            }
+        }
+        Step::FrameRead { done, total, .. } => {
+            if !quiet && total > 8 {
+                eprint!("\r  read {done} of {total}");
             }
         }
     }
-    if frames.is_empty() {
-        bail!("no frame could be read");
-    }
-
-    Ok(Survey { frames, masters, failed, seconds: started.elapsed().as_secs_f64() })
-}
-
-fn read_one(
-    host: &PluginHost,
-    session: &Session,
-    id: FrameId,
-    masters: &MasterSet,
-    options: &DetectOptions,
-) -> Result<Surveyed> {
-    let path = session.path(id).context("a frame with no path")?;
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-
-    let started = Instant::now();
-    let frame = host.open(&path).with_context(|| format!("opening {}", path.display()))?;
-    let Samples::U16(raw) = frame.decode().with_context(|| format!("decoding {}", path.display()))?
-    else {
-        bail!("{name}: floating-point sensor data is not read yet");
-    };
-
-    let pixels = if masters.dark.is_some() || masters.flat.is_some() {
-        apply(&raw, masters.dark.as_ref(), masters.flat.as_ref(), frame.layout()).0
-    } else {
-        raw.iter().map(|value| f32::from(*value)).collect()
-    };
-
-    // The saturation test inside `detect` reads the raw samples, whatever was
-    // applied to the plane the stars were measured on: the white level is a
-    // property of the sensor and means nothing after a pedestal has been
-    // removed.
-    let detection = detect(&pixels, &raw, frame.layout(), options)
-        .with_context(|| format!("{name}: no measurable sky to threshold against"))?;
-
-    let record = &session[id];
-    Ok(Surveyed {
-        name,
-        path: path.clone(),
-        layout: *frame.layout(),
-        camera_model: record.info.camera_model.clone(),
-        exposure_seconds: record.info.exposure_seconds,
-        iso: record.info.iso,
-        detection,
-        seconds: started.elapsed().as_secs_f64(),
-    })
+    // The command line has no cancel of its own: Ctrl-C already ends the
+    // process, and a second way to stop would be a second thing to keep in step.
+    Flow::Continue
 }
