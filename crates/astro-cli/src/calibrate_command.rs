@@ -16,7 +16,7 @@ use astro_core::{PluginHost, Samples};
 use clap::{ArgMatches, Args};
 
 use crate::format;
-use crate::master_command::{MasterSet, build_masters};
+use crate::master_command::{MasterSet, Wanted, build_masters};
 use crate::scan_command::{ScanArgs, options_from};
 
 #[derive(Args, Debug)]
@@ -60,6 +60,10 @@ pub fn run(host: &PluginHost, args: &CalibrateArgs, matches: &ArgMatches) -> Res
         plan,
         &Default::default(),
         &args.out,
+        // A calibrated light subtracts a dark and divides by a flat, so the
+        // bias is worth its decoding only when the masters themselves are being
+        // kept.
+        if args.keep_masters { Wanted::Matched } else { Wanted::Applied },
         args.keep_masters,
         args.scan.quiet,
     )?;

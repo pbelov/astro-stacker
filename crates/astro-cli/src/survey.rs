@@ -100,6 +100,10 @@ pub fn read(
             &partition,
             plan,
             &Default::default(),
+            // Reading a run calibrates lights, and a light subtracts a dark
+            // and divides by a flat. Building the bias as well decoded a whole
+            // calibration set and changed not one sample of the result.
+            astro_core::pipeline::Wanted::Applied,
             &|step| announce(step, scan.quiet),
         )?
     };
@@ -156,6 +160,11 @@ fn announce(step: Step<'_>, quiet: bool) -> Flow {
         Step::MasterMissing { kind } => {
             println!("{:<10} nothing matched, nothing built", kind.name())
         }
+        Step::MasterUnused { kind, set } => println!(
+            "{:<10} set {} matched, not built: a light subtracts a dark, never a bias",
+            kind.name(),
+            set.index()
+        ),
         Step::MasterReading { done, total, .. } => {
             if !quiet {
                 eprint!("\r  reading {done} of {total}");

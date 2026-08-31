@@ -62,6 +62,11 @@ pub enum Flow {
 pub enum Step<'a> {
     /// Nothing was matched for this role, so nothing will be applied.
     MasterMissing { kind: FrameKind },
+    /// A set was matched for this role, but this caller applies nothing from
+    /// it, so no master was built. Reported rather than skipped in silence: a
+    /// user who named a directory of biases has to learn that calibrating a
+    /// light does not read them, or the absence looks like a fault.
+    MasterUnused { kind: FrameKind, set: SetId },
     MasterReading { kind: FrameKind, set: SetId, done: usize, total: usize },
     MasterBuilt { kind: FrameKind, master: &'a Master, seconds: f64 },
     FrameRead { done: usize, total: usize, name: &'a str },
@@ -69,6 +74,31 @@ pub enum Step<'a> {
     /// them, and a progress bar that restarted without saying so reads as a
     /// crash rather than as the second pass.
     Stacking { pass: usize, passes: usize, done: usize, total: usize, name: &'a str },
+}
+
+/// Which of the plan's masters a caller needs built.
+///
+/// The distinction is not a preference, it is the difference between a
+/// deliverable and dead weight. [`crate::calibrate::apply`] takes a dark and a
+/// flat and nothing else, because a dark that matches its lights *is* the
+/// pedestal plus the dark current, so `l - D` removes both at once and the bias
+/// cancels identically — see the equations in [`crate::calibrate`]. On a run
+/// that only calibrates lights, a master bias is therefore a whole calibration
+/// set decoded to produce a buffer nothing reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wanted {
+    /// Only what will be applied: the dark and the flat.
+    Applied,
+    /// Every master the plan matched, for a caller whose purpose is to write
+    /// them out rather than to use them.
+    Matched,
+}
+
+impl Wanted {
+    /// Whether a master of this kind is worth the frames it would read.
+    pub fn includes(self, kind: FrameKind) -> bool {
+        self == Wanted::Matched || kind != FrameKind::Bias
+    }
 }
 
 /// Builds the masters a plan calls for.
@@ -81,6 +111,7 @@ pub fn masters(
     partition: &Partition,
     plan: &StackPlan,
     options: &CombineOptions,
+    wanted: Wanted,
     on: &dyn Fn(Step) -> Flow,
 ) -> Result<MasterSet> {
     let mut built = MasterSet::default();
@@ -90,9 +121,17 @@ pub fn masters(
         (FrameKind::Flat, plan.flat.as_ref()),
     ] {
         let Some(matched) = matched else {
-            on(Step::MasterMissing { kind });
+            // A role this caller would not have used is not missing, so saying
+            // nothing matched would be answering a question nobody asked.
+            if wanted.includes(kind) {
+                on(Step::MasterMissing { kind });
+            }
             continue;
         };
+        if !wanted.includes(kind) {
+            on(Step::MasterUnused { kind, set: matched.set });
+            continue;
+        }
         let Some(set) = partition.set(matched.set) else {
             on(Step::MasterMissing { kind });
             continue;

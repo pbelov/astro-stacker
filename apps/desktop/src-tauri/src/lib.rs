@@ -416,6 +416,7 @@ async fn measure_quality(
             &partition,
             plan,
             &Default::default(),
+            astro_core::pipeline::Wanted::Applied,
             &report,
         ) {
             Ok(masters) => masters,
@@ -570,6 +571,7 @@ async fn stack_run(
             &partition,
             plan,
             &Default::default(),
+            astro_core::pipeline::Wanted::Applied,
             &report,
         ) {
             Ok(masters) => masters,
@@ -1121,6 +1123,7 @@ mod tests {
             &partition,
             plan,
             &Default::default(),
+            astro_core::pipeline::Wanted::Applied,
             &|_| Flow::Continue,
         )
         .expect("the masters build");
@@ -1196,6 +1199,7 @@ mod tests {
             &partition,
             plan,
             &Default::default(),
+            astro_core::pipeline::Wanted::Applied,
             &|_| Flow::Continue,
         )
         .expect("the masters build");

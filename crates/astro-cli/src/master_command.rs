@@ -28,7 +28,7 @@ pub struct MasterArgs {
     pub resident_mb: Option<u64>,
 }
 
-pub use astro_core::pipeline::MasterSet;
+pub use astro_core::pipeline::{MasterSet, Wanted};
 
 pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result<()> {
     let (options, tolerances) = options_from(&args.scan, matches)?;
@@ -52,6 +52,9 @@ pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result
         chosen.plan,
         &combine,
         &args.out,
+        // Writing them out is the whole point of this command, so a matched
+        // bias is a deliverable here rather than dead weight.
+        Wanted::Matched,
         true,
         args.scan.quiet,
     )?;
@@ -75,6 +78,7 @@ pub fn build_masters(
     plan: &StackPlan,
     options: &CombineOptions,
     out: &Path,
+    wanted: Wanted,
     write: bool,
     quiet: bool,
 ) -> Result<MasterSet> {
@@ -89,9 +93,19 @@ pub fn build_masters(
     let mut built = MasterSet::default();
     for (kind, matched) in roles {
         let Some(matched) = matched else {
-            println!("{:<10} nothing matched, nothing built", kind.name());
+            if wanted.includes(kind) {
+                println!("{:<10} nothing matched, nothing built", kind.name());
+            }
             continue;
         };
+        if !wanted.includes(kind) {
+            println!(
+                "{:<10} set {} matched, not built: a light subtracts a dark, never a bias",
+                kind.name(),
+                matched.set.index()
+            );
+            continue;
+        }
         let Some(set) = partition.set(matched.set) else { continue };
         let master = build_one(host, session, set, options, out, write, quiet)?;
         match kind {
