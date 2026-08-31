@@ -302,6 +302,36 @@ enter. For point sources the signal is concentrated into the PSF noise area
 0 to 1 between them. Weighting by FWHM as a matter of course, which is the
 conventional thing to do, silently throws away good extended-structure signal.
 
+### A surveyed run keeps the order it was shot in, whatever order it was measured in
+
+Lights are measured several at a time, because nothing about one frame depends
+on another and decoding is the small part of the work — the full-frame passes
+that find the stars are the rest. What that must not disturb is the sequence.
+`align` chooses its reference from the middle of the run and chains its seeds
+between neighbours, so an index there means a position in the night; a run
+returned in the order the workers happened to finish would still register, and
+would register worse, silently. The pass therefore collects into position rather
+than pushing as results arrive, and that is a contract of `survey` rather than
+an accident of the iterator it uses.
+
+Stopping early means a frame that declines to start, since there is no way to
+interrupt one already under way and no reason to discard a measurement that has
+been paid for. So a stopped survey is the lights it managed, in order, with gaps
+— which is something to report and not something to align, and `stopped` is what
+says so.
+
+The worker count is derived from a memory budget and a core ceiling rather than
+chosen, and it is reported alongside the run, because it is a guess about the
+machine. Measurement refused a tidier rule: a nineteen-megapixel frame is still
+gaining workers at the core ceiling while a forty-six-megapixel one peaks at
+three and is slower than a single-threaded pass beyond six, and no budget in
+bytes names both — the small frame's best holds more live bytes than the large
+frame's worst. What saturates is the rate whole frames can be faulted in, and
+detection asks for five fresh full-frame buffers per frame and frees them again.
+The budget is therefore set to the largest value that regressed nothing rather
+than to the fastest value for any one body, and it is expected to move once
+those buffers are reused across frames instead of reallocated.
+
 ### Kappa-sigma rejection does not transfer from calibration frames to lights
 
 Every dark of a set has the same expectation at every pixel, which is what makes

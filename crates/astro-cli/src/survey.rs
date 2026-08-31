@@ -50,6 +50,12 @@ pub struct SurveyArgs {
     /// satellite, an aeroplane or two stars that should have been deblended.
     #[arg(long, value_name = "N", default_value_t = 400)]
     pub max_footprint: usize,
+
+    /// How many lights to measure at once. Derived from a memory budget and the
+    /// core count by default. `1` measures them one at a time, which is the
+    /// baseline a parallel run is checked against.
+    #[arg(long, value_name = "N")]
+    pub workers: Option<usize>,
 }
 
 pub use astro_core::pipeline::Measured as Surveyed;
@@ -78,6 +84,9 @@ pub fn read(
 ) -> Result<Read> {
     if args.step == 0 {
         bail!("--step 0 would read no frames");
+    }
+    if args.workers == Some(0) {
+        bail!("--workers 0 would measure no frames");
     }
     let (options, tolerances) = options_from(scan, matches)?;
     let report = astro_core::session::scan(host, &options)?;
@@ -135,17 +144,22 @@ pub fn read(
     };
     println!("\nreading {}", format::plural(selected.len(), "light"));
 
-    let survey = astro_core::pipeline::survey(
+    let survey = astro_core::pipeline::survey_with_workers(
         host,
         &report.session,
         &selected,
         &masters,
         &detect_options,
+        args.workers,
         &|step| announce(step, scan.quiet),
     );
     if !scan.quiet {
         eprint!("\r                                        \r");
     }
+    // Printed rather than assumed: the count comes from a memory budget and a
+    // guess about the machine, and a run that quietly measured one at a time is
+    // otherwise indistinguishable from one that used the whole processor.
+    println!("  measured   {} at a time", format::plural(survey.workers, "frame"));
     if survey.frames.is_empty() {
         bail!("no frame could be read");
     }

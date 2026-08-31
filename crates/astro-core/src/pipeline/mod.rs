@@ -17,9 +17,12 @@ pub mod align;
 pub mod stack;
 pub mod view;
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use astro_plugin_abi::abi::ImageLayout;
+use rayon::prelude::*;
 
 use crate::calibrate::{CombineOptions, Master, apply, build};
 use crate::error::{Error, Result};
@@ -69,10 +72,18 @@ pub enum Step<'a> {
     MasterUnused { kind: FrameKind, set: SetId },
     MasterReading { kind: FrameKind, set: SetId, done: usize, total: usize },
     MasterBuilt { kind: FrameKind, master: &'a Master, seconds: f64 },
+    /// A light has been measured. `done` counts the frames that have
+    /// *finished*, not the one that started: it is one-based, its last value is
+    /// `total`, and `name` is whichever frame just finished. Lights are
+    /// measured several at a time, so neither is a position in the run.
     FrameRead { done: usize, total: usize, name: &'a str },
     /// Depositing frames onto the output grid. Rejection needs two passes over
     /// them, and a progress bar that restarted without saying so reads as a
     /// crash rather than as the second pass.
+    ///
+    /// Unlike [`Step::FrameRead`], `done` here still counts frames *started*:
+    /// depositing is one frame at a time, spread across the machine within a
+    /// frame rather than across frames.
     Stacking { pass: usize, passes: usize, done: usize, total: usize, name: &'a str },
 }
 
@@ -171,6 +182,10 @@ pub struct Measured {
     pub exposure_seconds: Option<f64>,
     pub iso: Option<f64>,
     pub detection: Detection,
+    /// Wall clock for this one frame, including whatever it spent sharing the
+    /// machine with the others. It is a frame's share of a parallel pass and
+    /// not the cost of a frame: these sum to roughly [`Survey::workers`] times
+    /// [`Survey::seconds`], and the faster the pass gets the worse that grows.
     pub seconds: f64,
 }
 
@@ -180,7 +195,11 @@ pub struct Survey {
     pub frames: Vec<Measured>,
     /// Whether the caller stopped it early. `frames` then holds what was
     /// measured before that, which is worth keeping and must not be mistaken
-    /// for the whole run.
+    /// for the whole run — nor for its beginning. Frames already under way when
+    /// the stop was seen are finished and kept, so a stopped survey is the
+    /// lights it managed, in the order they were given, with gaps in it. That
+    /// makes it something to report and not something to align: `align` reads
+    /// an index as a position in the night.
     pub stopped: bool,
     /// Frames that were selected but could not be read, with the reason.
     ///
@@ -188,46 +207,226 @@ pub struct Survey {
     /// able to name the missing one, and a session that silently lost forty
     /// frames looks exactly like one that never had them.
     pub failed: Vec<(String, String)>,
+    /// How many lights were measured at once. Reported because it is derived
+    /// from a memory budget and a guess about the machine, not chosen.
+    pub workers: usize,
     pub seconds: f64,
 }
 
-/// Calibrates and measures every light given.
+/// Cap on decoded pixel data held while a run is measured.
+///
+/// Deliberately not the scan's open budget, which bounds the metadata pass,
+/// where a worker allocates one frame and frees it again. Measuring a light
+/// holds nine times that, so the scan's budget would size this pool to a single
+/// worker.
+///
+/// The number is a ceiling on harm rather than a search for the fastest answer,
+/// because measurement says the two cannot be had from one constant. Measured
+/// on this machine, a nineteen-megapixel body runs fastest at the core ceiling
+/// and is still gaining there, while a forty-six-megapixel one peaks at three
+/// workers, matches a single-threaded pass at six and is *slower* than one
+/// beyond that. There is no byte figure that names both: the small body's best
+/// holds more live bytes than the large body's worst. What actually saturates
+/// is the rate at which whole frames can be faulted in, and `detect` asks for
+/// five fresh full-frame buffers per frame and frees them again — so this
+/// ceiling is expected to lift, and this constant to be revisited, once those
+/// buffers are reused across frames rather than reallocated.
+///
+/// Four gibibytes is therefore chosen as the largest value that was not a
+/// regression on any body measured: it buys most of the available speed on a
+/// small frame and a smaller but real gain on a large one, and never turns a
+/// parallel pass into something slower than doing it one frame at a time.
+pub const DEFAULT_SURVEY_BUDGET_BYTES: u64 = 4 << 30;
+
+/// What measuring one light holds at its peak, as a multiple of its raw
+/// samples.
+///
+/// The peak is the second half of the separable matched filter, where the raw
+/// `u16` samples, the calibrated plane, the whitened plane, the filter's
+/// horizontal intermediate and its output are all live at once: `2N` plus four
+/// times `4N`, which is nine times the `2N` that `required_bytes` reports for a
+/// mosaiced sixteen-bit frame. Written as the buffers it counts rather than as
+/// a bare number, because a sixth full-frame pass added to `detect` would make
+/// it wrong and nothing else would notice.
+const PEAK_MULTIPLE_OF_RAW: u64 = 9;
+
+/// The progress callback, made safe to call from several workers at once.
+///
+/// The count and the call happen under one lock, and that is the point:
+/// incrementing atomically and then calling is not the same thing, because two
+/// workers can be reordered between the two and a bar would walk backwards by
+/// up to the worker count. The one lock also stops sixteen workers interleaving
+/// a carriage-returned terminal line into garbage, and keeps a channel's sends
+/// in the order the frames actually finished. It is held for the length of the
+/// callback, so a caller that does real work in there rather than printing or
+/// sending makes itself the narrow point of the whole pass.
+struct Reporter<'a> {
+    on: &'a (dyn for<'s> Fn(Step<'s>) -> Flow + Sync),
+    done: Mutex<usize>,
+    stopped: AtomicBool,
+}
+
+impl<'a> Reporter<'a> {
+    fn new(on: &'a (dyn for<'s> Fn(Step<'s>) -> Flow + Sync)) -> Self {
+        Self { on, done: Mutex::new(0), stopped: AtomicBool::new(false) }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
+    }
+
+    fn finished<'s>(&self, step: impl FnOnce(usize) -> Step<'s>) {
+        // Into the inner value rather than unwrapping a poisoned lock: a
+        // callback that panicked has already lost that one frame, and panicking
+        // in every other worker would throw away the measurements they made.
+        let mut done = self.done.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *done += 1;
+        if (self.on)(step(*done)) == Flow::Stop {
+            self.stopped.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Calibrates and measures every light given, several at a time.
 ///
 /// One unreadable frame in a night of two hundred does not lose the other
 /// hundred and ninety-nine, and does not pass unmentioned either.
+///
+/// `frames` comes back in the order `lights` was given, whatever order the
+/// workers finished in. That is a contract and not an accident: [`align`]
+/// chooses its reference from the middle of the run and chains its seeds
+/// between neighbours, so an index there means a position in the night.
 pub fn survey(
     host: &PluginHost,
     session: &Session,
     lights: &[FrameId],
     masters: &MasterSet,
     options: &DetectOptions,
-    on: &dyn Fn(Step) -> Flow,
+    on: &(dyn Fn(Step) -> Flow + Sync),
+) -> Survey {
+    survey_with_workers(host, session, lights, masters, options, None, on)
+}
+
+/// [`survey`], with the worker count named rather than derived.
+///
+/// `Some(1)` is a genuinely sequential pass, and it is kept reachable because
+/// it is the only way to show that measuring a run several frames at a time
+/// produces the same star lists as measuring it one frame at a time.
+#[allow(clippy::too_many_arguments)]
+pub fn survey_with_workers(
+    host: &PluginHost,
+    session: &Session,
+    lights: &[FrameId],
+    masters: &MasterSet,
+    options: &DetectOptions,
+    workers: Option<usize>,
+    on: &(dyn Fn(Step) -> Flow + Sync),
 ) -> Survey {
     let started = Instant::now();
-    let mut frames = Vec::with_capacity(lights.len());
-    let mut failed = Vec::new();
-    let mut stopped = false;
+    let total = lights.len();
+    let reporter = Reporter::new(on);
+    let mut workers = workers.map_or_else(
+        || size_the_pool(session, lights, DEFAULT_SURVEY_BUDGET_BYTES),
+        |named| named.max(1),
+    );
 
-    for (index, id) in lights.iter().copied().enumerate() {
+    type Outcome = Option<std::result::Result<Measured, (String, String)>>;
+    let read = |id: FrameId| -> Outcome {
+        // Asked before the work rather than after it, because rayon has no
+        // cancellation of its own: the cheapest honest stop is a frame that
+        // declines to start. Frames already under way are finished and kept -
+        // they are measurements, and throwing away a dozen decoded frames to
+        // make the ending tidy is the worse trade.
+        if reporter.stopped() {
+            return None;
+        }
         let name = session
             .path(id)
             .and_then(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_else(|| format!("frame {}", id.index()));
-        if on(Step::FrameRead { done: index, total: lights.len(), name: &name }) == Flow::Stop {
-            stopped = true;
-            break;
-        }
+        let outcome = read_one(host, session, id, &name, masters, options);
+        reporter.finished(|done| Step::FrameRead { done, total, name: &name });
+        // Rendered here rather than carried out, so that `Error` never has to
+        // cross a thread boundary for this to compile.
+        Some(outcome.map_err(|error| (name, format!("{error}"))))
+    };
 
-        match read_one(host, session, id, &name, masters, options) {
-            Ok(frame) => frames.push(frame),
-            Err(error) => failed.push((name, format!("{error}"))),
+    // A pool that will not build is not a reason to refuse to measure the run;
+    // it only costs speed. The fallback runs genuinely serially, for the reason
+    // `session::scan` gives at the same point: falling through to `par_iter`
+    // outside an `install` would run on rayon's global pool, whose thread count
+    // owes nothing to the budget this pass was sized against, and the number
+    // reported to the user would be a fiction.
+    let outcomes: Vec<Outcome> = match rayon::ThreadPoolBuilder::new().num_threads(workers).build()
+    {
+        Ok(pool) => pool.install(|| lights.par_iter().copied().map(read).collect()),
+        Err(err) => {
+            log::warn!("measuring the run on one thread: {err}");
+            workers = 1;
+            lights.iter().copied().map(read).collect()
+        }
+    };
+
+    // Back into the order the night was shot in. Collecting an indexed parallel
+    // iterator already preserves it; this loop only splits the outcomes apart,
+    // so `failed` comes out chronological too. A `None` is a light the stop
+    // reached first: never attempted, so neither measured nor failed.
+    let mut frames = Vec::with_capacity(total);
+    let mut failed = Vec::new();
+    for outcome in outcomes.into_iter().flatten() {
+        match outcome {
+            Ok(measured) => frames.push(measured),
+            Err(failure) => failed.push(failure),
         }
     }
 
     // A stopped pass returns what it measured rather than nothing. The caller
     // knows it stopped - it is the one that said so - and half a run of
     // measurements is still half a run of measurements.
-    Survey { frames, stopped, failed, seconds: started.elapsed().as_secs_f64() }
+    Survey {
+        frames,
+        stopped: reporter.stopped(),
+        failed,
+        workers,
+        seconds: started.elapsed().as_secs_f64(),
+    }
+}
+
+/// Turns the memory budget into a worker count, against the largest frame the
+/// run actually holds.
+///
+/// Unlike `session::scan`'s equivalent this costs no open: the session has been
+/// scanned already, so every layout is in hand.
+fn size_the_pool(session: &Session, lights: &[FrameId], budget_bytes: u64) -> usize {
+    let widest = lights
+        .iter()
+        .filter_map(|id| session.frame(*id))
+        .filter_map(|record| record.layout.required_bytes())
+        .max()
+        .unwrap_or(1 << 26) as u64;
+    let per_worker = (widest * PEAK_MULTIPLE_OF_RAW).max(1);
+    (budget_bytes / per_worker).clamp(1, worker_ceiling() as u64) as usize
+}
+
+/// How many lights are worth measuring at once on this machine.
+///
+/// `available_parallelism` answers a different question: it reports logical
+/// parallelism, which on a part with simultaneous multithreading is twice the
+/// cores, and the standard library offers no way to ask for the physical count.
+/// The second thread on a core brings no decoder of its own and shares the
+/// cache and the memory pipe with the first, which on work that streams whole
+/// frames costs more than it brings.
+///
+/// So this halves, which is a guess about the hardware rather than a fact about
+/// it, and on a part without simultaneous multithreading it leaves speed
+/// unclaimed. It is affordable because the curve is flat near its top, and it
+/// is honest because the number arrived at is reported in [`Survey::workers`]
+/// and [`survey_with_workers`] takes an override. On the frames this project is
+/// measured against the budget binds first anyway, so this ceiling only decides
+/// the small-frame case.
+fn worker_ceiling() -> usize {
+    let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
+    if logical >= 8 { logical / 2 } else { logical }
 }
 
 fn read_one(
@@ -283,4 +482,67 @@ fn read_one(
         detection,
         seconds: started.elapsed().as_secs_f64(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{FrameKind, testing};
+
+    fn a_run_of(count: usize) -> (Session, Vec<FrameId>) {
+        let mut session = Session::new();
+        let lights = (0..count)
+            .map(|index| {
+                let name = format!("IMG_{index:04}.CR3");
+                testing::assigned(&mut session, FrameKind::Light, &name, testing::light())
+            })
+            .collect();
+        (session, lights)
+    }
+
+    #[test]
+    fn a_night_of_subframes_stays_in_the_order_it_was_shot() {
+        // The property `align` depends on. It chooses its reference from the
+        // middle of the run and chains its seeds between neighbours, so an
+        // index is a position in the night; measuring the frames several at a
+        // time must not reorder them by which finished first. The work is
+        // deliberately slowest-first, so completion order is the reverse of
+        // input order and a collect that did not preserve position would fail
+        // rather than pass by luck.
+        let given: Vec<usize> = (0..64).collect();
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(8).build().expect("a pool");
+        let measured: Vec<usize> = pool.install(|| {
+            given
+                .par_iter()
+                .copied()
+                .map(|index| {
+                    std::thread::sleep(std::time::Duration::from_micros(
+                        (64 - index) as u64 * 50,
+                    ));
+                    index
+                })
+                .collect()
+        });
+        assert_eq!(measured, given, "the run came back reordered by completion time");
+    }
+
+    #[test]
+    fn a_budget_that_fits_one_frame_measures_one_frame_at_a_time() {
+        // A hundred-megapixel body holds nearly two gibibytes per worker, and
+        // the failure this guards is the pool opening one per core and asking
+        // for thirty of them.
+        let (session, lights) = a_run_of(8);
+        let peak = 8280u64 * 5520 * 2 * PEAK_MULTIPLE_OF_RAW;
+        assert_eq!(size_the_pool(&session, &lights, peak), 1);
+        assert_eq!(size_the_pool(&session, &lights, peak * 3 / 2), 1);
+        assert_eq!(size_the_pool(&session, &lights, peak * 2), 2);
+    }
+
+    #[test]
+    fn a_generous_budget_stops_at_the_machine_rather_than_at_the_frame_count() {
+        let (session, lights) = a_run_of(8);
+        let workers = size_the_pool(&session, &lights, u64::MAX / 2);
+        assert_eq!(workers, worker_ceiling());
+        assert!(workers >= 1);
+    }
 }
