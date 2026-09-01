@@ -24,7 +24,9 @@ use anyhow::{Context, Result, bail};
 use astro_core::PluginHost;
 use astro_core::calibrate::{fits, tiff};
 use astro_core::integrate::{DEFAULT_PIXFRAC, Rejection};
-use astro_core::pipeline::stack::{Selection, StackOptions, Stacked, combine, select};
+use astro_core::pipeline::stack::{
+    Selection, StackOptions, Stacked, combine_with_look_ahead, select,
+};
 use astro_core::pipeline::view;
 use astro_core::pipeline::{Flow, Step};
 use astro_core::session::FrameKind;
@@ -95,6 +97,12 @@ pub struct StackArgs {
     /// Say what each frame contributed.
     #[arg(long)]
     pub each: bool,
+
+    /// How many frames to decode ahead of the deposit. `0` decodes on the
+    /// depositing thread. Derived from the frame size and the machine by
+    /// default; depositing itself stays one frame at a time and in order.
+    #[arg(long, value_name = "N")]
+    pub look_ahead: Option<usize>,
 }
 
 pub fn run(host: &PluginHost, args: &StackArgs, matches_of: &ArgMatches) -> Result<()> {
@@ -135,7 +143,8 @@ pub fn run(host: &PluginHost, args: &StackArgs, matches_of: &ArgMatches) -> Resu
 
     std::fs::create_dir_all(&args.out)
         .with_context(|| format!("creating {}", args.out.display()))?;
-    let stacked = combine(host, &selection, &survey.masters, &options, &|step| {
+    let stacked =
+        combine_with_look_ahead(host, &selection, &survey.masters, &options, args.look_ahead, &|step| {
         if let Step::Stacking { pass, passes, done, total, .. } = step
             && !args.scan.quiet
         {
@@ -233,6 +242,7 @@ fn report_stack(stacked: &Stacked) {
         (stacked.canvas.width * stacked.canvas.height) as f64 / 1e6
     );
     println!("  combined   {} frames in {:.1}s", stacked.frames, stacked.seconds);
+    println!("  decoded    {} ahead of the deposit", format::plural(stacked.look_ahead, "frame"));
     if let Some((dropped, considered)) = stacked.rejected {
         let share = if considered > 0 { dropped as f64 / considered as f64 * 100.0 } else { 0.0 };
         println!("  rejected   {share:.3}% of samples ({dropped} of {considered})");

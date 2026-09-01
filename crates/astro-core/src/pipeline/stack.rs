@@ -8,9 +8,12 @@
 //! computable before it is set — a limit chosen without seeing that is chosen
 //! blind.
 
+use std::sync::mpsc;
 use std::time::Instant;
 
-use crate::calibrate::apply;
+use astro_plugin_abi::abi::ImageLayout;
+
+use crate::calibrate::apply_into;
 use crate::error::{Error, Result};
 use crate::integrate::{Background, Canvas, Contribution, DEFAULT_PIXFRAC, Guide, Rejection, Stack};
 use crate::register::{Registration, Transform, matches};
@@ -250,6 +253,10 @@ pub struct Stacked {
     /// How many deposits the second pass threw away, and out of how many.
     /// `None` where rejection was not asked for.
     pub rejected: Option<(usize, usize)>,
+    /// How many frames were decoded ahead of the deposit. Reported for the same
+    /// reason [`super::Survey::workers`] is: derived from a memory budget and a
+    /// guess about the machine, not chosen.
+    pub look_ahead: usize,
     /// Frames that lost an unusual share of their samples, worst first.
     ///
     /// Reported rather than counted: a frame losing a large fraction is not a
@@ -276,6 +283,23 @@ pub fn combine(
     options: &StackOptions,
     on: &dyn Fn(Step) -> Flow,
 ) -> Result<Stacked> {
+    combine_with_look_ahead(host, selection, masters, options, None, on)
+}
+
+/// [`combine`], with the look-ahead named rather than derived.
+///
+/// `Some(0)` decodes on the depositing thread. It is kept reachable because it
+/// is the only way to show that a run stacked from frames arriving on several
+/// threads produces the same bits as one stacked from frames arriving on none.
+#[allow(clippy::too_many_arguments)]
+pub fn combine_with_look_ahead(
+    host: &PluginHost,
+    selection: &Selection<'_>,
+    masters: &MasterSet,
+    options: &StackOptions,
+    look_ahead: Option<usize>,
+    on: &dyn Fn(Step) -> Flow,
+) -> Result<Stacked> {
     let usable: Vec<&Chosen<'_>> = selection.frames.iter().filter(|f| f.usable()).collect();
     if usable.is_empty() {
         return Err(Error::NothingToCombine);
@@ -289,7 +313,10 @@ pub fn combine(
 
     let started = Instant::now();
     let passes = if options.rejection.is_some() { 2 } else { 1 };
-    let mut pass = deposit(host, &usable, masters, options, canvas, &mosaic, 1, passes, None, on)?;
+    let look_ahead =
+        look_ahead.unwrap_or_else(|| look_ahead_lanes(&usable, DEFAULT_LOOK_AHEAD_BYTES));
+    let mut pass =
+        deposit(host, &usable, masters, options, canvas, &mosaic, 1, passes, look_ahead, None, on)?;
 
     let (rejected, heavy_losses) = match options.rejection {
         None => (None, Vec::new()),
@@ -315,6 +342,7 @@ pub fn combine(
                 &mosaic,
                 2,
                 passes,
+                look_ahead,
                 Some((&guide, &rejection)),
                 on,
             )?;
@@ -346,6 +374,7 @@ pub fn combine(
         frames: pass.stack.frames(),
         seconds: started.elapsed().as_secs_f64(),
         rejected,
+        look_ahead,
         heavy_losses,
     })
 }
@@ -366,6 +395,113 @@ struct Pass {
     losses: Vec<(String, usize, usize)>,
 }
 
+/// Calibrated planes one lane owns.
+///
+/// Two, and the pair is the point: a lane fills one while the deposit is
+/// reading the other. With one it would hand over its only buffer and wait for
+/// it back, which is the sequential pass with a thread attached to it.
+const PLANES_PER_LANE: usize = 2;
+
+/// What one lane holds while a pass runs, as a multiple of one frame's raw
+/// samples: [`PLANES_PER_LANE`] calibrated planes at four bytes a sample, plus
+/// the two-byte raw its decode is holding at the time.
+///
+/// Unlike the survey's peak this is resident rather than transient — the planes
+/// are allocated once and refilled for the length of the run.
+const LANE_MULTIPLE_OF_RAW: u64 = 1 + 2 * PLANES_PER_LANE as u64;
+
+/// How many frames may be decoded ahead of the deposit.
+///
+/// The tempting argument is that the deposit already spreads over every core, so
+/// a lane must be a thread taken from it. Measurement says otherwise, and it is
+/// worth writing down why: `Stack::add` floors its band height, so a frame is
+/// cut into a few dozen bands rather than into one per worker, and the tail of
+/// that split leaves part of the machine idle for a share of every frame. A lane
+/// fills idle capacity rather than competing for busy capacity, which is why
+/// this is eight and not the two or three the tempting argument predicts. The
+/// gain flattens where there is no idle left to fill.
+///
+/// Where that falls depends on how a frame's cost divides between its decode and
+/// its deposit, which moves with the body and with the canvas — hence the
+/// override on [`combine_with_look_ahead`] and the number reported in
+/// [`Stacked::look_ahead`].
+const MAX_LOOK_AHEAD: usize = 8;
+
+/// Cap on decoded pixel data held ahead of the deposit.
+///
+/// Deliberately below the survey's budget, and for a different reason than the
+/// survey's is what it is. A lane runs beside a deposit that already holds the
+/// accumulator — most of a gigabyte of cells at a full canvas, and a guide
+/// beside it on the second pass — so what this bounds is what can be held *as
+/// well as* that, rather than what a pass may hold on its own. It is also what
+/// keeps a large body from opening as many lanes as a small one: the frames are
+/// bigger, so fewer fit.
+const DEFAULT_LOOK_AHEAD_BYTES: u64 = 2 << 30;
+
+/// The deposit's end of one lane: where filled planes arrive, and where the
+/// empty ones go back.
+struct Lane {
+    filled: mpsc::Receiver<Ready>,
+    free: mpsc::SyncSender<Vec<f32>>,
+}
+
+/// One frame, decoded and calibrated, on its way to the stack.
+struct Ready {
+    /// Carried only so that a debug build says so if the rotation ever slips.
+    /// The order is structural rather than checked — see [`deposit`].
+    index: usize,
+    /// Travels with the outcome rather than beside it, so that a frame which
+    /// failed still hands back the buffer it was lent.
+    plane: Vec<f32>,
+    /// `Err` where this frame could not be read. Carried to its turn rather than
+    /// raised where it happened: lanes run ahead, so a later frame can fail
+    /// before an earlier one is even opened, and a run with two unreadable
+    /// frames has to name the same one it named when it was sequential.
+    outcome: Result<ImageLayout>,
+}
+
+/// Everything one frame needs before it can be deposited, into a buffer the
+/// caller owns.
+///
+/// Pure, and per frame, which is the whole licence for running it ahead of the
+/// deposit. The `OpenFrame` is made and dropped inside this call, so the plugin
+/// handle that the ABI says belongs to one thread never leaves the thread that
+/// made it.
+fn prepare(
+    host: &PluginHost,
+    frame: &Chosen<'_>,
+    masters: &MasterSet,
+    plane: &mut Vec<f32>,
+) -> Result<ImageLayout> {
+    let opened = host.open(&frame.read.path)?;
+    let Samples::U16(raw) = opened.decode()? else {
+        return Err(Error::Unmeasurable {
+            name: frame.read.name.clone(),
+            reason: "floating-point sensor data is not stacked yet".to_owned(),
+        });
+    };
+    apply_into(&raw, masters.dark.as_ref(), masters.flat.as_ref(), opened.layout(), plane);
+    // `raw` dies here, on the lane. Shipping it onward instead would leave the
+    // calibration in front of the deposit on one thread, and that is half of
+    // what is being moved out of its way.
+    Ok(*opened.layout())
+}
+
+/// How many frames to decode ahead, from the frame size and the machine.
+fn look_ahead_lanes(usable: &[&Chosen<'_>], budget_bytes: u64) -> usize {
+    let widest = usable
+        .iter()
+        .filter_map(|frame| frame.read.layout.required_bytes())
+        .max()
+        .unwrap_or(1 << 26) as u64;
+    let per_lane = (widest * LANE_MULTIPLE_OF_RAW).max(1);
+    // A quarter of the logical count, where the survey takes half: a lane is
+    // filling the gaps the deposit's band split leaves, and there are fewer of
+    // those than there are cores.
+    let ceiling = std::thread::available_parallelism().map_or(1, |n| n.get() / 4).max(1);
+    (budget_bytes / per_lane).clamp(1, ceiling.min(MAX_LOOK_AHEAD) as u64) as usize
+}
+
 #[allow(clippy::too_many_arguments)]
 fn deposit(
     host: &PluginHost,
@@ -376,6 +512,7 @@ fn deposit(
     mosaic: &Mosaic,
     pass: usize,
     passes: usize,
+    look_ahead: usize,
     judge: Option<(&Guide, &Rejection)>,
     on: &dyn Fn(Step) -> Flow,
 ) -> Result<Pass> {
@@ -385,55 +522,128 @@ fn deposit(
     let (mut dropped, mut considered) = (0usize, 0usize);
     let mut losses = Vec::with_capacity(usable.len());
 
-    for (index, frame) in usable.iter().enumerate() {
-        let step = Step::Stacking {
-            pass,
-            passes,
-            done: index,
-            total: usable.len(),
-            name: &frame.read.name,
-        };
-        if on(step) == Flow::Stop {
-            return Err(Error::Cancelled);
-        }
-
-        let opened = host.open(&frame.read.path)?;
-        let Samples::U16(raw) = opened.decode()? else {
-            return Err(Error::Unmeasurable {
-                name: frame.read.name.clone(),
-                reason: "floating-point sensor data is not stacked yet".to_owned(),
+    // Decoding runs ahead on its own threads; depositing does not. The stack's
+    // cells are a running float sum per output pixel, and float addition is not
+    // associative, so the order the frames are added in is part of the answer.
+    //
+    // Here that order is structural rather than restored: lane `l` takes frames
+    // `l`, `l + lanes`, `l + 2 * lanes` and so on, in that order down its own
+    // channel, and the loop asks lane `index % lanes` for its next frame at step
+    // `index`. So the k-th thing a lane sends is the k-th thing the loop takes
+    // from it, and nothing has to be sorted or buffered to put the run back in
+    // order.
+    //
+    // Plain threads rather than rayon, and the loop stays on the thread that
+    // called in. `Stack::add` sizes its bands from `rayon::current_num_threads`
+    // and splits them over the global pool; a lane parked inside the plugin's
+    // decode is not a task anything can steal from, so lanes on that pool would
+    // leave the deposit cutting bands for workers that are inside an FFI call.
+    std::thread::scope(|scope| -> Result<()> {
+        // Declared here so that every way out of this closure — the `?` on an
+        // unreadable frame included — drops them before the scope joins. A lane
+        // waiting for a plane that will never come back is woken by its end of
+        // the channel going away, and unwinds instead of parking a thread the
+        // join is waiting on.
+        let mut lanes: Vec<Lane> = Vec::with_capacity(look_ahead);
+        for lane in 0..look_ahead {
+            let (free, spare) = mpsc::sync_channel::<Vec<f32>>(PLANES_PER_LANE);
+            let (ready, filled) = mpsc::sync_channel::<Ready>(PLANES_PER_LANE - 1);
+            for _ in 0..PLANES_PER_LANE {
+                // The channel holds exactly the planes this lane owns, so
+                // priming it cannot block.
+                free.send(Vec::new()).expect("the lane's own end is still open");
+            }
+            scope.spawn(move || {
+                for index in (lane..usable.len()).step_by(look_ahead) {
+                    let Ok(mut plane) = spare.recv() else { return };
+                    let outcome = prepare(host, usable[index], masters, &mut plane);
+                    if ready.send(Ready { index, plane, outcome }).is_err() {
+                        return;
+                    }
+                }
             });
-        };
-        let pixels = apply(&raw, masters.dark.as_ref(), masters.flat.as_ref(), opened.layout()).0;
-
-        let background = Background::fit(&frame.read.detection.sky, mosaic);
-        let scale = frame.scale.expect("a frame without a scale was refused");
-        for (colour, level) in pedestal.iter_mut().enumerate() {
-            *level += frame.weight * scale * background.centre(colour, opened.layout());
+            lanes.push(Lane { filled, free });
         }
-        pedestal_weight += frame.weight;
 
-        let contribution = Contribution {
-            pixels: &pixels,
-            layout: opened.layout(),
-            mosaic,
-            background,
-            scale,
-            weight: frame.weight,
-            noise: noise_of(frame),
-            transform: frame.registration.transform,
-        };
-        match judge {
-            None => stack.add(&contribution, options.pixfrac),
-            Some((guide, rejection)) => {
-                let (lost, seen) =
-                    stack.add_checked(&contribution, options.pixfrac, guide, rejection);
-                dropped += lost;
-                considered += seen;
-                losses.push((frame.read.name.clone(), lost, seen));
+        // The no-lane path is this same loop with nothing to take from, and it
+        // reuses one plane just as a lane does. So it is the pipeline with the
+        // pipe removed rather than the pass that stood here before, which is
+        // what makes it the reference the pipelined one has to match bit for
+        // bit.
+        let mut solo = Vec::new();
+
+        for (index, frame) in usable.iter().enumerate() {
+            let step = Step::Stacking {
+                pass,
+                passes,
+                done: index,
+                total: usable.len(),
+                name: &frame.read.name,
+            };
+            // Still asked before the frame is waited for, so that a stop does
+            // not have to sit out a decode already under way.
+            if on(step) == Flow::Stop {
+                return Err(Error::Cancelled);
+            }
+
+            let (mut plane, layout, lent) = if lanes.is_empty() {
+                let plane = std::mem::take(&mut solo);
+                let mut plane = plane;
+                let layout = prepare(host, frame, masters, &mut plane)?;
+                (plane, layout, None)
+            } else {
+                let lane = &lanes[index % lanes.len()];
+                let Ok(ready) = lane.filled.recv() else {
+                    // A lane stops sending its share only by panicking, and the
+                    // scope re-raises that when it joins, so this is never the
+                    // value that surfaces. Returning rather than panicking again
+                    // leaves the original panic as the one the caller sees.
+                    return Err(Error::Cancelled);
+                };
+                let Ready { index: sent, plane, outcome } = ready;
+                debug_assert_eq!(sent, index, "the lane rotation slipped");
+                (plane, outcome?, Some(lane))
+            };
+
+            let background = Background::fit(&frame.read.detection.sky, mosaic);
+            let scale = frame.scale.expect("a frame without a scale was refused");
+            for (colour, level) in pedestal.iter_mut().enumerate() {
+                *level += frame.weight * scale * background.centre(colour, &layout);
+            }
+            pedestal_weight += frame.weight;
+
+            let contribution = Contribution {
+                pixels: &plane,
+                layout: &layout,
+                mosaic,
+                background,
+                scale,
+                weight: frame.weight,
+                noise: noise_of(frame),
+                transform: frame.registration.transform,
+            };
+            match judge {
+                None => stack.add(&contribution, options.pixfrac),
+                Some((guide, rejection)) => {
+                    let (lost, seen) =
+                        stack.add_checked(&contribution, options.pixfrac, guide, rejection);
+                    dropped += lost;
+                    considered += seen;
+                    losses.push((frame.read.name.clone(), lost, seen));
+                }
+            }
+
+            // Back to the lane it came from, which is what keeps the pass to a
+            // fixed number of full-frame buffers however long the run is.
+            match lent {
+                Some(lane) => {
+                    let _ = lane.free.send(std::mem::take(&mut plane));
+                }
+                None => solo = plane,
             }
         }
-    }
+        Ok(())
+    })?;
 
     // The background was subtracted per frame so a moon rising does not enter
     // the stack as a gradient. One common level goes back, so the result reads

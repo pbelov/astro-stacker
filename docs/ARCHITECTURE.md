@@ -320,6 +320,27 @@ been paid for. So a stopped survey is the lights it managed, in order, with gaps
 — which is something to report and not something to align, and `stopped` is what
 says so.
 
+Combining has the same requirement for a different reason and answers it a
+different way. The stack's cells are a running float sum per output pixel, and
+float addition is not associative, so the order frames are deposited in is part
+of the answer — and unlike the survey, the per-frame work here already spreads
+over the whole machine, so the frames cannot simply be run in parallel. What runs
+ahead is the decoding and the calibration, on a few plain threads, each taking
+every n-th frame down a channel of its own. The deposit then asks lane `index %
+lanes` for its next frame, so the k-th thing a lane sends is the k-th thing the
+deposit takes from it: the order is structural, and nothing has to be sorted or
+buffered to restore it.
+
+Each lane owns two full-frame buffers and hands them back after the deposit has
+read them, so the pass holds a fixed amount however long the run is. The count is
+derived from the frame size, and the argument that it should be small — that the
+deposit already has every core, so a lane can only take one from it — is wrong,
+which is worth recording because it is the obvious argument. The band split
+floors its height, so a frame is cut into a few dozen bands rather than one per
+worker, and the tail of that split leaves part of the machine idle for a share of
+every frame. Measurement puts the flattening point around eight lanes rather than
+the two or three the wrong argument predicts.
+
 The worker count is derived from a memory budget and a core ceiling rather than
 chosen, and it is reported alongside the run, because it is a guess about the
 machine. Measurement refused a tidier rule: a nineteen-megapixel frame is still

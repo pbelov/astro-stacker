@@ -289,7 +289,31 @@ pub fn apply(
     flat: Option<&Master>,
     layout: &ImageLayout,
 ) -> (Vec<f32>, u64) {
-    let mut out: Vec<f32> = light.iter().map(|value| f32::from(*value)).collect();
+    let mut out = Vec::new();
+    let undefined = apply_into(light, dark, flat, layout, &mut out);
+    (out, undefined)
+}
+
+/// [`apply`], into a buffer the caller owns and keeps.
+///
+/// The same three passes over the frame, deliberately: what is being saved here
+/// is the allocation and not the arithmetic. Stacking a night asks the kernel
+/// for a fresh plane and hands it back once per frame per pass, and every one of
+/// those is a mapping the kernel zeroes before it is overwritten. Fusing the
+/// three passes into one would be faster again and would change the last bit of
+/// every pixel, so it is not done here.
+///
+/// `out` is overwritten in full and its previous contents are never read, so a
+/// buffer of the wrong length or of another frame's pixels is safe to pass.
+pub fn apply_into(
+    light: &[u16],
+    dark: Option<&Master>,
+    flat: Option<&Master>,
+    layout: &ImageLayout,
+    out: &mut Vec<f32>,
+) -> u64 {
+    out.clear();
+    out.extend(light.iter().map(|value| f32::from(*value)));
     let mut undefined = 0u64;
 
     if let Some(dark) = dark
@@ -314,7 +338,7 @@ pub fn apply(
     }
 
     let _ = layout;
-    (out, undefined)
+    undefined
 }
 
 #[cfg(test)]
@@ -369,6 +393,105 @@ mod tests {
             pedestal: None,
             normalisation: None,
             info: FrameInfo::default(),
+        }
+    }
+
+    /// What `apply` was, kept verbatim so that the buffer-reusing version can be
+    /// held against it. If this and `apply_into` ever stop agreeing bit for bit,
+    /// a stack built by the two of them stops agreeing too.
+    fn reference_apply(
+        light: &[u16],
+        dark: Option<&Master>,
+        flat: Option<&Master>,
+    ) -> (Vec<f32>, u64) {
+        let mut out: Vec<f32> = light.iter().map(|value| f32::from(*value)).collect();
+        let mut undefined = 0u64;
+        if let Some(dark) = dark
+            && dark.pixels.len() == out.len()
+        {
+            for (value, subtract) in out.iter_mut().zip(&dark.pixels) {
+                *value -= subtract;
+            }
+        }
+        if let Some(flat) = flat
+            && flat.pixels.len() == out.len()
+        {
+            for (value, divisor) in out.iter_mut().zip(&flat.pixels) {
+                if divisor.is_finite() && *divisor >= MIN_FLAT {
+                    *value /= divisor;
+                } else {
+                    *value = f32::NAN;
+                    undefined += 1;
+                }
+            }
+        }
+        (out, undefined)
+    }
+
+    fn master_of(kind: FrameKind, layout: ImageLayout, pixels: Vec<f32>) -> Master {
+        Master {
+            kind,
+            layout,
+            pixels,
+            frames: 3,
+            method: Method::Median,
+            rejected: 0,
+            resident: true,
+            pedestal: None,
+            normalisation: None,
+            info: FrameInfo::default(),
+        }
+    }
+
+    #[test]
+    fn calibrating_into_a_borrowed_buffer_gives_the_same_bits_as_into_a_fresh_one() {
+        // The whole licence for reusing the buffer. Compared by bits and not by
+        // value, so that a NaN where a NaN belongs counts as agreement and a
+        // NaN where a number belongs does not.
+        let (width, height) = (16usize, 8usize);
+        let shape = layout(width, height, 0);
+        let light: Vec<u16> = (0..width * height).map(|i| (i * 977 % 16384) as u16).collect();
+
+        let dark = master_of(
+            FrameKind::Dark,
+            shape,
+            (0..width * height).map(|i| 2040.0 + (i % 7) as f32).collect(),
+        );
+        // Every way the flat's guard can go, including the exact boundary and
+        // the values that are not numbers.
+        let awkward = [MIN_FLAT, MIN_FLAT - 1.0, 0.0, -0.0, -1.0, f32::NAN, f32::INFINITY,
+                       f32::NEG_INFINITY, 1.0, 4096.0];
+        let flat = master_of(
+            FrameKind::Flat,
+            shape,
+            (0..width * height).map(|i| awkward[i % awkward.len()]).collect(),
+        );
+        let wrong_length = master_of(FrameKind::Dark, shape, vec![1.0; width * height - 1]);
+
+        let cases: [(Option<&Master>, Option<&Master>); 6] = [
+            (None, None),
+            (Some(&dark), None),
+            (None, Some(&flat)),
+            (Some(&dark), Some(&flat)),
+            (Some(&wrong_length), Some(&flat)),
+            (Some(&dark), Some(&wrong_length)),
+        ];
+
+        // Deliberately dirty, and deliberately the wrong length to begin with:
+        // a lane hands the same buffer round the whole run.
+        let mut reused: Vec<f32> = vec![f32::NAN; 3];
+        for (case, (dark, flat)) in cases.into_iter().enumerate() {
+            let (wanted, wanted_undefined) = reference_apply(&light, dark, flat);
+            let got_undefined = apply_into(&light, dark, flat, &shape, &mut reused);
+            assert_eq!(got_undefined, wanted_undefined, "case {case}: undefined count");
+            assert_eq!(reused.len(), wanted.len(), "case {case}: length");
+            for (index, (got, wanted)) in reused.iter().zip(&wanted).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    wanted.to_bits(),
+                    "case {case}, sample {index}: {got} against {wanted}"
+                );
+            }
         }
     }
 
