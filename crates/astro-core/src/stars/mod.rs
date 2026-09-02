@@ -280,26 +280,65 @@ fn matched_filter(plane: &mut [f32], work: &mut [f32], width: usize, height: usi
     // exactly that one-dimensional sum.
     let noise_scale: f32 = kernel.iter().map(|k| k * k).sum();
 
+    // Both passes run a tap at a time over a whole row, rather than a row at a
+    // time over every tap. The sum each output ends up with is the same one in
+    // the same order — zero, then tap zero, then tap one — so every result is
+    // the same float; what changes is that the innermost loop walks two
+    // contiguous rows instead of recomputing a clamped index per tap.
+    //
+    // The clamp is what costs. Written per tap it is a comparison and a select
+    // on every one of a frame's photosites for every tap, and it sits in the
+    // inner loop where it stops the row being walked as a run of neighbours. Off
+    // the edges it is not arithmetic at all: it names the first or the last
+    // sample, the same one for a stretch of the row. So each tap is cut into the
+    // stretch that reads the first sample, the stretch that reads its own
+    // neighbour, and the stretch that reads the last.
     for y in 0..height {
         let row = y * width;
-        for x in 0..width {
-            let mut total = 0f32;
-            for (i, weight) in kernel.iter().enumerate() {
-                let sample = (x + i).saturating_sub(radius).min(width - 1);
-                total += plane[row + sample] * weight;
+        let (source, out) = (&plane[row..row + width], &mut work[row..row + width]);
+        out.fill(0.0);
+        for (i, weight) in kernel.iter().enumerate() {
+            let weight = *weight;
+            // Where this tap stops reading before the row and starts reading
+            // past it. Both saturate, so a frame narrower than the kernel is
+            // all edge and no middle rather than a panic.
+            let head = radius.saturating_sub(i).min(width);
+            let tail = (width + radius).saturating_sub(i).min(width).max(head);
+            let (first, last) = (source[0], source[width - 1]);
+            for value in &mut out[..head] {
+                *value += first * weight;
             }
-            work[row + x] = total;
+            // Capped at the row's length for the degenerate case only: on a
+            // frame narrower than the kernel a late tap is head and tail with
+            // nothing between them, and the middle it would name starts past
+            // the row. Where there is a middle at all this changes nothing.
+            let offset = (head + i).saturating_sub(radius).min(width);
+            for (value, sample) in out[head..tail].iter_mut().zip(&source[offset..]) {
+                *value += *sample * weight;
+            }
+            for value in &mut out[tail..] {
+                *value += last * weight;
+            }
         }
     }
 
+    // The vertical pass needs no such split: a tap clamps the whole row at once,
+    // so the row it reads is chosen before the loop rather than per photosite.
+    // It writes over the plane it was given, which is free by now — the pass
+    // reads only the intermediate.
     for y in 0..height {
-        for x in 0..width {
-            let mut total = 0f32;
-            for (i, weight) in kernel.iter().enumerate() {
-                let sample = (y + i).saturating_sub(radius).min(height - 1);
-                total += work[sample * width + x] * weight;
+        let row = y * width;
+        plane[row..row + width].fill(0.0);
+        for (i, weight) in kernel.iter().enumerate() {
+            let weight = *weight;
+            let from = (y + i).saturating_sub(radius).min(height - 1) * width;
+            let source = &work[from..from + width];
+            for (value, sample) in plane[row..row + width].iter_mut().zip(source) {
+                *value += *sample * weight;
             }
-            plane[y * width + x] = total / noise_scale;
+        }
+        for value in &mut plane[row..row + width] {
+            *value /= noise_scale;
         }
     }
 }
@@ -734,6 +773,89 @@ mod tests {
         }
         let raw: Vec<u16> = pixels.iter().map(|v| v.clamp(0.0, 65_535.0) as u16).collect();
         (pixels, raw, layout)
+    }
+
+    /// The filter as it was written before the taps were split off the edges
+    /// and the loops turned inside out: one running total per output, a clamped
+    /// index recomputed on every tap.
+    ///
+    /// Kept so the rewrite can be held against it. The claim being tested is not
+    /// that the two are close but that they are the same float, so this has to
+    /// stay a copy rather than become a second opinion.
+    fn reference_matched_filter(input: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+        let radius = (sigma * 3.0).ceil().max(1.0) as usize;
+        let mut kernel: Vec<f32> = (0..=2 * radius)
+            .map(|i| {
+                let offset = i as f32 - radius as f32;
+                (-(offset * offset) / (2.0 * sigma * sigma)).exp()
+            })
+            .collect();
+        let total: f32 = kernel.iter().sum();
+        for value in &mut kernel {
+            *value /= total;
+        }
+        let noise_scale: f32 = kernel.iter().map(|k| k * k).sum();
+
+        let mut horizontal = vec![0f32; input.len()];
+        for y in 0..height {
+            let row = y * width;
+            for x in 0..width {
+                let mut total = 0f32;
+                for (i, weight) in kernel.iter().enumerate() {
+                    let sample = (x + i).saturating_sub(radius).min(width - 1);
+                    total += input[row + sample] * weight;
+                }
+                horizontal[row + x] = total;
+            }
+        }
+
+        let mut out = vec![0f32; input.len()];
+        for y in 0..height {
+            for x in 0..width {
+                let mut total = 0f32;
+                for (i, weight) in kernel.iter().enumerate() {
+                    let sample = (y + i).saturating_sub(radius).min(height - 1);
+                    total += horizontal[sample * width + x] * weight;
+                }
+                out[y * width + x] = total / noise_scale;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn splitting_the_filter_off_the_edges_changes_no_bit_of_it() {
+        // Sizes chosen against the split rather than against the picture: one
+        // narrower than the kernel, where a tap is all edge and no middle; one
+        // exactly twice the radius; and shapes where width and height differ so
+        // that a row index standing in for a column one would show.
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        let mut noise = move || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (state >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        for sigma in [0.3f32, 1.6, 4.0] {
+            let radius = (sigma * 3.0).ceil().max(1.0) as usize;
+            for (width, height) in
+                [(3usize, 5usize), (2 * radius, 2 * radius + 1), (37, 11), (11, 37), (64, 48)]
+            {
+                let source: Vec<f32> =
+                    (0..width * height).map(|i| noise() * 1000.0 + i as f32).collect();
+                let wanted = reference_matched_filter(&source, width, height, sigma);
+
+                let mut plane = source.clone();
+                let mut work = vec![f32::NAN; width * height];
+                matched_filter(&mut plane, &mut work, width, height, sigma);
+
+                for (index, (got, wanted)) in plane.iter().zip(&wanted).enumerate() {
+                    assert_eq!(
+                        got.to_bits(),
+                        wanted.to_bits(),
+                        "sigma {sigma}, {width}x{height}, sample {index}: {got} against {wanted}"
+                    );
+                }
+            }
+        }
     }
 
     /// A frame whose measurable area stops short of its edges, which is what
