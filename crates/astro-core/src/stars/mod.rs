@@ -156,30 +156,89 @@ pub fn detect(
     layout: &ImageLayout,
     options: &DetectOptions,
 ) -> Option<Detection> {
+    detect_with(pixels, raw, layout, options, &mut Scratch::new())
+}
+
+/// Full-frame working memory for [`detect_with`], owned by whoever is measuring
+/// a run rather than by one call of it.
+///
+/// A survey worker keeps one for a whole night: the buffers grow to the largest
+/// frame that worker is handed and are never given back. What that saves is the
+/// mapping and the kernel's zeroing of it, not the arithmetic — a plane returned
+/// between frames is faulted back in one page at a time on the next one.
+///
+/// Deliberately not `Clone`. The only reason to clone one would be to give a
+/// worker its own, and rayon's `map_with` clones its item into both halves of
+/// every split, which would make that a deep copy of two full frames.
+#[derive(Debug, Default)]
+pub struct Scratch {
+    /// Whitened on the way in and filtered on the way out. The filter's result
+    /// lands back here because nothing reads a whitened value once the
+    /// horizontal pass has consumed it, and a third resident plane per worker is
+    /// exactly what would push the survey's per-worker estimate past what it
+    /// claims.
+    plane: Vec<f32>,
+    /// The separable filter's horizontal intermediate.
+    work: Vec<f32>,
+    claimed: Vec<bool>,
+    /// One source's samples, reused across the thousands in a frame.
+    samples: Vec<(f64, f64, f64)>,
+}
+
+impl Scratch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// [`detect`], with the working memory supplied by the caller.
+///
+/// `scratch` is working memory and never an output: nothing in it is read before
+/// it is written, so one of the wrong length, or holding another frame's pixels,
+/// is safe to pass.
+pub fn detect_with(
+    pixels: &[f32],
+    raw: &[u16],
+    layout: &ImageLayout,
+    options: &DetectOptions,
+    scratch: &mut Scratch,
+) -> Option<Detection> {
     let mosaic = Mosaic::new(layout)?;
     let width = layout.width as usize;
-    if pixels.len() != width * layout.height as usize || raw.len() != pixels.len() {
+    let height = layout.height as usize;
+    if pixels.len() != width * height || raw.len() != pixels.len() {
         return None;
     }
     let sky = sky::measure(pixels, layout, &mosaic)?;
+    let Scratch { plane, work, claimed, samples } = scratch;
 
     // Signal above this photosite's own colour's sky, in units of that colour's
     // own noise. Everything downstream thresholds on a plane whose noise is one
     // everywhere, which is what lets a single number be the threshold.
     let area = mosaic.area;
-    let mut whitened = vec![0f32; pixels.len()];
+    // Cleared and regrown rather than resized in place: the loop below writes
+    // only the measurable area while the filter reads the whole plane, so what
+    // lies outside the area has to be the zero a fresh allocation used to give
+    // for free. A border left over from the previous frame reaches the filter's
+    // radius into the area, where it changes which photosites a footprint grows
+    // through without changing anything a test has ever looked at.
+    plane.clear();
+    plane.resize(pixels.len(), 0.0);
     for y in area.y..area.y + area.height {
         let row = y * width;
         for x in area.x..area.x + area.width {
             let colour = mosaic.colour_at(x, y);
             let noise = sky.sigma_at(x, y, colour);
             let value = pixels[row + x] - sky.level_at(x, y, colour);
-            whitened[row + x] = if noise > 0.0 && value.is_finite() { value / noise } else { 0.0 };
+            plane[row + x] = if noise > 0.0 && value.is_finite() { value / noise } else { 0.0 };
         }
     }
 
-    let filtered = matched_filter(&whitened, width, layout.height as usize, options.filter_sigma);
-    let found = extract(&filtered, pixels, raw, layout, &mosaic, &sky, options);
+    // Not cleared, unlike the plane: every element of it is assigned by the
+    // horizontal pass before the vertical one reads any.
+    work.resize(pixels.len(), 0.0);
+    matched_filter(plane, work, width, height, options.filter_sigma);
+    let found = extract(plane, pixels, raw, layout, &mosaic, &sky, options, claimed, samples);
 
     let (sky_level, noise) = sky_summary(&sky, &mosaic);
     let shape = FrameShape::of(&found.stars, sky_level, noise);
@@ -199,7 +258,12 @@ pub fn detect(
 /// filter width: convolving unit white noise with a kernel that sums to one
 /// leaves noise of `sum(k^2)` in two dimensions, which is 0.176 at sigma 1.6, so
 /// an unscaled five would really be a twenty-eight.
-fn matched_filter(input: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+///
+/// Filters `plane` in place, using `work` as the intermediate between the two
+/// passes. Writing the result back over the input is safe and changes no value:
+/// the vertical pass reads only `work`, so nothing it overwrites is read again.
+/// Both must already be `width * height` long.
+fn matched_filter(plane: &mut [f32], work: &mut [f32], width: usize, height: usize, sigma: f32) {
     let radius = (sigma * 3.0).ceil().max(1.0) as usize;
     let mut kernel: Vec<f32> = (0..=2 * radius)
         .map(|i| {
@@ -216,31 +280,28 @@ fn matched_filter(input: &[f32], width: usize, height: usize, sigma: f32) -> Vec
     // exactly that one-dimensional sum.
     let noise_scale: f32 = kernel.iter().map(|k| k * k).sum();
 
-    let mut horizontal = vec![0f32; input.len()];
     for y in 0..height {
         let row = y * width;
         for x in 0..width {
             let mut total = 0f32;
             for (i, weight) in kernel.iter().enumerate() {
                 let sample = (x + i).saturating_sub(radius).min(width - 1);
-                total += input[row + sample] * weight;
+                total += plane[row + sample] * weight;
             }
-            horizontal[row + x] = total;
+            work[row + x] = total;
         }
     }
 
-    let mut out = vec![0f32; input.len()];
     for y in 0..height {
         for x in 0..width {
             let mut total = 0f32;
             for (i, weight) in kernel.iter().enumerate() {
                 let sample = (y + i).saturating_sub(radius).min(height - 1);
-                total += horizontal[sample * width + x] * weight;
+                total += work[sample * width + x] * weight;
             }
-            out[y * width + x] = total / noise_scale;
+            plane[y * width + x] = total / noise_scale;
         }
     }
-    out
 }
 
 struct Found {
@@ -258,12 +319,19 @@ fn extract(
     mosaic: &Mosaic,
     sky: &Sky,
     options: &DetectOptions,
+    claimed: &mut Vec<bool>,
+    samples: &mut Vec<(f64, f64, f64)>,
 ) -> Found {
     let width = layout.width as usize;
     let area = mosaic.area;
     // One byte per photosite rather than a hash set: a frame has nineteen
     // million of them and the sets would dominate both time and memory.
-    let mut claimed = vec![false; pixels.len()];
+    //
+    // Refilled and not merely resized, because nothing in this pass ever writes
+    // a `false`: a photosite left claimed by the previous frame would silently
+    // suppress every source standing on it.
+    claimed.clear();
+    claimed.resize(pixels.len(), false);
     let mut stars = Vec::new();
     let (mut saturated, mut oversized) = (0usize, 0usize);
 
@@ -361,7 +429,9 @@ fn extract(
             // `peak` is the filtered value at the local maximum that started
             // this footprint, which is the source's detection significance in
             // sigma - the plane's noise is one by construction.
-            if let Some(star) = measure_star(&footprint, pixels, layout, mosaic, sky, peak) {
+            if let Some(star) =
+                measure_star(&footprint, pixels, layout, mosaic, sky, peak, samples)
+            {
                 stars.push(star);
             }
         }
@@ -413,6 +483,7 @@ const WINDOW_TOLERANCE: f64 = 1e-3;
 /// Measured on the sky-subtracted frame, never on the filtered plane: the filter
 /// exists to decide *where* to look, and measuring on it would report the
 /// filter's own width added to every star.
+#[allow(clippy::too_many_arguments)]
 fn measure_star(
     footprint: &[usize],
     pixels: &[f32],
@@ -420,11 +491,16 @@ fn measure_star(
     mosaic: &Mosaic,
     sky: &Sky,
     significance: f32,
+    samples: &mut Vec<(f64, f64, f64)>,
 ) -> Option<Star> {
     let width = layout.width as usize;
     // Negatives are kept throughout. They are half of the noise, and leaving
     // them out is what biases the widths.
-    let mut samples: Vec<(f64, f64, f64)> = Vec::with_capacity(footprint.len());
+    //
+    // Borrowed rather than allocated: this is one allocation per source and a
+    // frame holds thousands of them. The capacity is bounded by the footprint
+    // cap and settles after the first few.
+    samples.clear();
 
     for &index in footprint {
         let (x, y) = (index % width, index / width);
@@ -439,7 +515,7 @@ fn measure_star(
     // A starting point for the window, not a reported measurement: the negative
     // half is dropped here only so that the first window is positive-definite.
     let (mut sum, mut cx, mut cy) = (0f64, 0f64, 0f64);
-    for &(x, y, value) in &samples {
+    for &(x, y, value) in samples.iter() {
         if value > 0.0 {
             sum += value;
             cx += value * x;
@@ -451,7 +527,7 @@ fn measure_star(
     }
     let (cx, cy) = (cx / sum, cy / sum);
     let (mut s11, mut s22, mut s12) = (0f64, 0f64, 0f64);
-    for &(x, y, value) in &samples {
+    for &(x, y, value) in samples.iter() {
         if value > 0.0 {
             let (dx, dy) = (x - cx, y - cy);
             s11 += value * dx * dx;
@@ -461,7 +537,7 @@ fn measure_star(
     }
     let seed = Moments { m11: s11 / sum, m22: s22 / sum, m12: s12 / sum };
 
-    let Some((x, y, moments, under_window)) = window_moments(&samples, cx, cy, seed) else {
+    let Some((x, y, moments, under_window)) = window_moments(samples, cx, cy, seed) else {
         // The shape could not be fitted, but the position still stands, and
         // registration wants positions. `Moments::NONE` keeps this source out of
         // the frame's shape statistics rather than voting a made-up width into
@@ -658,6 +734,95 @@ mod tests {
         }
         let raw: Vec<u16> = pixels.iter().map(|v| v.clamp(0.0, 65_535.0) as u16).collect();
         (pixels, raw, layout)
+    }
+
+    /// A frame whose measurable area stops short of its edges, which is what
+    /// every real sensor looks like and what none of the other fixtures here do.
+    fn inset(width: usize, height: usize, margin: usize) -> ImageLayout {
+        let mut layout = layout(width, height);
+        layout.active_x = margin as u32;
+        layout.active_y = margin as u32;
+        layout.active_width = (width - 2 * margin) as u32;
+        layout.active_height = (height - 2 * margin) as u32;
+        layout
+    }
+
+    #[test]
+    fn a_reused_scratch_finds_exactly_the_stars_a_fresh_one_does() {
+        // The trap this exists for: the whitening loop writes only the
+        // measurable area, while the filter reads the whole plane, so what lies
+        // outside the area used to be zero because the allocation was fresh. A
+        // buffer carried between frames brings the previous frame's border with
+        // it, and it reaches the filter's radius into the area — far enough to
+        // change which photosites a footprint grows through, and so the moments
+        // and the flux, without moving any star far enough to look wrong.
+        //
+        // Sizes deliberately go up as well as down, and an inset frame follows a
+        // frame whose area runs edge to edge, so the border being tested is one
+        // the previous frame actually wrote into.
+        //ance third source sits a few photosites inside the measurable area, where
+        // a stale border can still reach it.
+        let sources = [
+            (40.0, 34.0, 1.9, 3.6, 0.4, 9000.0),
+            (78.0, 61.0, 1.7, 1.7, 0.0, 4000.0),
+            (14.0, 15.0, 1.8, 1.8, 0.0, 7000.0),
+        ];
+        let mut carried = Scratch::new();
+        let mut compared = 0usize;
+
+        // The second options set narrows the scan margin below the filter's
+        // radius. With the shipped `max_footprint` the scan starts far enough
+        // inside the area that a stale border cannot seed or suppress a
+        // detection, only bend a footprint that grows out to meet it; this one
+        // puts the contaminated strip under the peak scan itself, which is where
+        // the failure is visible rather than merely present.
+        let narrow = DetectOptions { max_footprint: 8, ..DetectOptions::default() };
+        for (width, height, margin, options) in [
+            (128usize, 96usize, 0usize, DetectOptions::default()),
+            (128, 96, 9, DetectOptions::default()),
+            (128, 96, 6, narrow),
+            (96, 72, 4, narrow),
+            (160, 128, 11, DetectOptions::default()),
+            (128, 96, 9, DetectOptions::default()),
+        ] {
+            let (pixels, raw, _) = frame(width, height, &sources);
+            let layout = inset(width, height, margin);
+
+            let fresh = detect(&pixels, &raw, &layout, &options);
+            // Hostile rather than merely stale, and of exactly the right length
+            // so that a `resize` alone would leave every byte of it in place.
+            // Whatever the previous frame happened to leave behind is a subset
+            // of this, so a pass here is a pass for any order of frames.
+            carried.plane = vec![1.0e6; width * height];
+            carried.work = vec![-1.0e6; width * height];
+            carried.claimed = vec![true; width * height];
+            carried.samples = vec![(f64::NAN, f64::NAN, f64::NAN); 32];
+            let reused = detect_with(&pixels, &raw, &layout, &options, &mut carried);
+
+            assert_eq!(
+                fresh.is_none(),
+                reused.is_none(),
+                "{width}x{height}+{margin}: one run measured the frame and the other did not"
+            );
+            let (Some(fresh), Some(reused)) = (fresh, reused) else { continue };
+            compared += fresh.stars.len();
+            assert_eq!(fresh.stars.len(), reused.stars.len(), "{width}x{height}+{margin} count");
+            assert_eq!(fresh.saturated, reused.saturated, "{width}x{height}+{margin} saturated");
+            assert_eq!(fresh.oversized, reused.oversized, "{width}x{height}+{margin} oversized");
+            for (index, (a, b)) in fresh.stars.iter().zip(&reused.stars).enumerate() {
+                // By bits, so that a NaN counts as agreement only where the
+                // fresh run also produced one.
+                assert_eq!(a.x.to_bits(), b.x.to_bits(), "{width}x{height}+{margin} star {index} x");
+                assert_eq!(a.y.to_bits(), b.y.to_bits(), "{width}x{height}+{margin} star {index} y");
+                assert_eq!(a.flux.to_bits(), b.flux.to_bits(), "{width}x{height}+{margin} flux");
+                assert_eq!(a.significance.to_bits(), b.significance.to_bits(), "significance");
+                assert_eq!(a.footprint, b.footprint, "{width}x{height}+{margin} footprint");
+                assert_eq!(a.moments.m11.to_bits(), b.moments.m11.to_bits(), "m11");
+                assert_eq!(a.moments.m22.to_bits(), b.moments.m22.to_bits(), "m22");
+                assert_eq!(a.moments.m12.to_bits(), b.moments.m12.to_bits(), "m12");
+            }
+        }
+        assert!(compared > 0, "the fixtures produced no stars, so nothing was actually compared");
     }
 
     #[test]

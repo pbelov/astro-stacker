@@ -347,11 +347,20 @@ machine. Measurement refused a tidier rule: a nineteen-megapixel frame is still
 gaining workers at the core ceiling while a forty-six-megapixel one peaks at
 three and is slower than a single-threaded pass beyond six, and no budget in
 bytes names both — the small frame's best holds more live bytes than the large
-frame's worst. What saturates is the rate whole frames can be faulted in, and
-detection asks for five fresh full-frame buffers per frame and frees them again.
-The budget is therefore set to the largest value that regressed nothing rather
-than to the fastest value for any one body, and it is expected to move once
-those buffers are reused across frames instead of reallocated.
+frame's worst. The budget is therefore set to the largest value that regressed
+nothing rather than to the fastest value for any one body.
+
+What the large frame runs into is not settled, and the first answer written here
+was wrong, which is worth recording because it was the plausible one. It said the
+pass saturates the rate whole frames can be faulted in, and detection's habit of
+allocating a fresh full-frame buffer per frame was the cause. The arithmetic does
+not support it: at its optimum the small frame sustains several times the fresh
+mapping per second that the large frame collapses at, and a resource one case
+saturates harder is not what the other is hitting. Detection's buffers are now
+reused whatever the reason, because a pass that asks the kernel for three hundred
+megabytes per frame and hands it straight back is worth removing on its own
+terms; but the ceiling is a measurement without an explanation, and the budget
+stands on the measurement.
 
 ### Kappa-sigma rejection does not transfer from calibration frames to lights
 

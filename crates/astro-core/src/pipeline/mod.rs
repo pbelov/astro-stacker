@@ -24,10 +24,10 @@ use std::time::Instant;
 use astro_plugin_abi::abi::ImageLayout;
 use rayon::prelude::*;
 
-use crate::calibrate::{CombineOptions, Master, apply, build};
+use crate::calibrate::{CombineOptions, Master, apply_into, build};
 use crate::error::{Error, Result};
 use crate::session::{FrameId, FrameKind, Partition, SetId, Session, StackPlan};
-use crate::stars::{DetectOptions, Detection, detect};
+use crate::stars::{DetectOptions, Detection, Scratch, detect_with};
 use crate::{PluginHost, Samples};
 
 /// The three masters a light needs, each `None` where nothing was matched.
@@ -226,11 +226,17 @@ pub struct Survey {
 /// and is still gaining there, while a forty-six-megapixel one peaks at three
 /// workers, matches a single-threaded pass at six and is *slower* than one
 /// beyond that. There is no byte figure that names both: the small body's best
-/// holds more live bytes than the large body's worst. What actually saturates
-/// is the rate at which whole frames can be faulted in, and `detect` asks for
-/// five fresh full-frame buffers per frame and frees them again — so this
-/// ceiling is expected to lift, and this constant to be revisited, once those
-/// buffers are reused across frames rather than reallocated.
+/// holds more live bytes than the large body's worst.
+///
+/// What the large body is actually hitting is not settled, and this comment used
+/// to name a mechanism it cannot support — that the pass saturates the rate whole
+/// frames can be faulted in. It does not add up: at its optimum the small body
+/// sustains several times the fresh mapping per second that the large body falls
+/// over at, and a resource one case saturates harder is not what the other is
+/// running into. The candidates that fit the shape are the cost of unmapping a
+/// large region across many cores, and the asymmetry of this part's two core
+/// complexes. Until one of them is shown, the constant stands on the measurement
+/// rather than on an explanation.
 ///
 /// Four gibibytes is therefore chosen as the largest value that was not a
 /// regression on any body measured: it buys most of the available speed on a
@@ -241,13 +247,23 @@ pub const DEFAULT_SURVEY_BUDGET_BYTES: u64 = 4 << 30;
 /// What measuring one light holds at its peak, as a multiple of its raw
 /// samples.
 ///
-/// The peak is the second half of the separable matched filter, where the raw
-/// `u16` samples, the calibrated plane, the whitened plane, the filter's
-/// horizontal intermediate and its output are all live at once: `2N` plus four
-/// times `4N`, which is nine times the `2N` that `required_bytes` reports for a
-/// mosaiced sixteen-bit frame. Written as the buffers it counts rather than as
-/// a bare number, because a sixth full-frame pass added to `detect` would make
-/// it wrong and nothing else would notice.
+/// What a worker holds is now resident rather than transient: the raw `u16`
+/// samples at `2N`, the calibrated plane at `4N`, and the detection's scratch —
+/// one plane it whitens and then filters in place, one intermediate for the
+/// separable filter, and a byte per photosite for the flood fill — at `4N`,
+/// `4N` and `N`. That is `15N`, which is seven and a half times the `2N` that
+/// `required_bytes` reports for a mosaiced sixteen-bit frame.
+///
+/// Left at nine rather than tightened to eight, deliberately. Tightening it
+/// would raise the derived worker count, and a change in how many frames are
+/// measured at once does not belong in the same commit as a change that must be
+/// shown to alter nothing: it would confound the very comparison that proves the
+/// buffers are safe to reuse. It belongs behind its own sweep on both a small
+/// and a large body.
+///
+/// Written as the buffers it counts rather than as a bare number, because
+/// another full-frame buffer added to `detect` would make it wrong and nothing
+/// else would notice.
 const PEAK_MULTIPLE_OF_RAW: u64 = 9;
 
 /// The progress callback, made safe to call from several workers at once.
@@ -325,6 +341,13 @@ pub fn survey_with_workers(
     let started = Instant::now();
     let total = lights.len();
     let reporter = Reporter::new(on);
+    // The lanes not currently measuring a frame. A free list rather than a slot
+    // per thread: `rayon::current_thread_index` is `None` on the serial fallback
+    // below, which runs on the caller's thread, and would name a stranger's slot
+    // if a survey were ever run from inside another pool. At most one lane is
+    // out per frame in flight, so what is resident is still the worker count
+    // this pass was sized against.
+    let idle: Mutex<Vec<Lane>> = Mutex::new(Vec::new());
     let mut workers = workers.map_or_else(
         || size_the_pool(session, lights, DEFAULT_SURVEY_BUDGET_BYTES),
         |named| named.max(1),
@@ -344,7 +367,11 @@ pub fn survey_with_workers(
             .path(id)
             .and_then(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
             .unwrap_or_else(|| format!("frame {}", id.index()));
-        let outcome = read_one(host, session, id, &name, masters, options);
+        let mut lane = idle.lock().unwrap_or_else(|p| p.into_inner()).pop().unwrap_or_default();
+        let outcome = read_one(host, session, id, &name, masters, options, &mut lane);
+        // Handed back before the frame is reported, so a lane is never held for
+        // the length of someone else's progress callback.
+        idle.lock().unwrap_or_else(|p| p.into_inner()).push(lane);
         reporter.finished(|done| Step::FrameRead { done, total, name: &name });
         // Rendered here rather than carried out, so that `Error` never has to
         // cross a thread boundary for this to compile.
@@ -429,6 +456,19 @@ fn worker_ceiling() -> usize {
     if logical >= 8 { logical / 2 } else { logical }
 }
 
+/// What one survey worker keeps for the length of the run.
+///
+/// The calibrated plane belongs here as much as the detection's own scratch
+/// does: same size, and the same fresh mapping asked of the kernel and handed
+/// straight back on every frame. What is still allocated per frame is the decode
+/// buffer, which the plugin boundary owns.
+#[derive(Debug, Default)]
+struct Lane {
+    pixels: Vec<f32>,
+    scratch: Scratch,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn read_one(
     host: &PluginHost,
     session: &Session,
@@ -436,6 +476,7 @@ fn read_one(
     name: &str,
     masters: &MasterSet,
     options: &DetectOptions,
+    lane: &mut Lane,
 ) -> Result<Measured> {
     let path = session
         .path(id)
@@ -453,17 +494,25 @@ fn read_one(
         });
     };
 
-    let pixels = if masters.is_empty() {
-        raw.iter().map(|value| f32::from(*value)).collect()
+    if masters.is_empty() {
+        lane.pixels.clear();
+        lane.pixels.extend(raw.iter().map(|value| f32::from(*value)));
     } else {
-        apply(&raw, masters.dark.as_ref(), masters.flat.as_ref(), frame.layout()).0
-    };
+        apply_into(
+            &raw,
+            masters.dark.as_ref(),
+            masters.flat.as_ref(),
+            frame.layout(),
+            &mut lane.pixels,
+        );
+    }
 
     // The saturation test inside `detect` reads the raw samples, whatever was
     // applied to the plane the stars were measured on: the white level is a
     // property of the sensor and means nothing after a pedestal has been
     // removed.
-    let detection = detect(&pixels, &raw, frame.layout(), options).ok_or_else(|| {
+    let detection = detect_with(&lane.pixels, &raw, frame.layout(), options, &mut lane.scratch)
+        .ok_or_else(|| {
         Error::Unmeasurable {
             name: name.to_owned(),
             reason: "no measurable sky to threshold against".to_owned(),
