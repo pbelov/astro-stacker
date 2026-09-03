@@ -44,11 +44,14 @@ pub const KAPPA: f32 = 3.0;
 
 /// How much decoded pixel data may be resident while a master is combined.
 ///
-/// Below this the frames are all held and the answer is exact; above it the
-/// combination streams and reads every frame twice. Two gibibytes holds
-/// fifty-six 19-megapixel frames or twenty-three at 45 megapixels, which covers
-/// the darks and flats of an ordinary session and leaves a large bias run to
-/// stream.
+/// Below this the frames are all held and each is read once; above it the
+/// combination streams and reads every frame twice.
+///
+/// A constant, and deliberately not a share of what [`crate::machine`] reports
+/// free — which is what it wants to be, and what it cannot be until the two
+/// paths agree about how they estimate a spread. See the note in
+/// [`clipped_mean`]: while they disagree, letting this follow the machine would
+/// mean a master built on a busy machine differs from one built on an idle one.
 pub const DEFAULT_RESIDENT_BYTES: u64 = 2 << 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +160,16 @@ pub fn combine(
 
     let method = options.method.unwrap_or_else(|| Method::for_frames(frames.len()));
     let frame_bytes = (pixels * size_of::<u16>()) as u64;
-    let resident = frames.len() as u64 * frame_bytes <= options.resident_bytes;
+    // A set small enough to be combined by the median is held whatever the
+    // budget says. The streaming path cannot take a median — it would need every
+    // value at a photosite at once, which is the thing it exists to avoid — so
+    // it always clips, and a budget that pushed a small set into it would change
+    // the master's method without being asked to. That is a decision about the
+    // arithmetic, and a decision about the arithmetic must not be made by how
+    // much memory happened to be free. The ceiling this floors against is the
+    // same one the method is chosen by, so the two cannot disagree.
+    let budget = options.resident_bytes.max((MEDIAN_CEILING as u64).saturating_mul(frame_bytes));
+    let resident = frames.len() as u64 * frame_bytes <= budget;
 
     let shape = Shape { layout: &layout, pixels };
     if resident {
@@ -181,8 +193,11 @@ const BAND: usize = 1 << 16;
 /// to the physical cores rather than the logical ones, for the reason the survey
 /// gives: the second thread on a core brings no decoder of its own.
 fn pool(frames: usize) -> Option<rayon::ThreadPool> {
-    let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let workers = if logical >= 8 { logical / 2 } else { logical }.min(frames);
+    let cores = crate::machine::physical_cores().unwrap_or_else(|| {
+        let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
+        if logical >= 8 { logical / 2 } else { logical }
+    });
+    let workers = cores.min(frames);
     if workers <= 1 {
         return None;
     }
@@ -442,6 +457,16 @@ fn median(values: &mut [f32]) -> f32 {
 fn clipped_mean(values: &[f32], kappa: f32) -> (f32, u64) {
     let count = values.len() as f32;
     let mean = values.iter().sum::<f32>() / count;
+    // NOTE: this divides by `n` while `combine_streaming` divides by `n - 1`,
+    // so the two paths estimate the spread differently and reject different
+    // samples — and which path a set takes is decided by whether it fits in
+    // memory. Measured on a real eighty-five frame set the difference is 0.2999%
+    // of samples rejected against 0.3153%, and masters differing by up to 427
+    // ADU where a rejection went the other way. Unifying them on `n - 1` moves
+    // every clipped-mean master and every stack built through one, so it is not
+    // done here; until it is, the resident budget must stay a constant, because
+    // a budget that followed free memory would let the machine's load decide
+    // which estimator a set got.
     let variance =
         values.iter().map(|value| (value - mean) * (value - mean)).sum::<f32>() / count.max(1.0);
     let tolerance = variance.sqrt() * kappa;

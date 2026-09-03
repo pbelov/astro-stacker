@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.16.4"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -25,6 +25,9 @@ libloading = "0.9"
 log = "0.4"
 rawler = "0.7"
 rayon = "1"
+# Only the `system` half: this is asked two questions, how much memory is free
+# and how many cores are physical, and neither wants processes or disks.
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 thiserror = "2"
 
 [profile.release]

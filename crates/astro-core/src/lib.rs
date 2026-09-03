@@ -7,6 +7,7 @@
 //! which plugin did it.
 
 pub mod calibrate;
+pub mod machine;
 pub mod error;
 pub mod frame;
 pub mod plugin;

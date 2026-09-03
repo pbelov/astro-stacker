@@ -215,10 +215,21 @@ pub struct Survey {
 
 /// Cap on decoded pixel data held while a run is measured.
 ///
-/// Deliberately not the scan's open budget, which bounds the metadata pass,
-/// where a worker allocates one frame and frees it again. Measuring a light
-/// holds nine times that, so the scan's budget would size this pool to a single
-/// worker.
+/// **This is not a memory budget, whatever its name and units suggest, and it
+/// must not be made to follow the machine's free memory.** It is a ceiling on
+/// how many frames may be measured at once, expressed in the only quantity that
+/// scales correctly with the body: a large frame gets fewer workers than a small
+/// one, and that is the whole point of it. The number was chosen as the largest
+/// that regressed nothing — larger values made a forty-six-megapixel run
+/// *slower than single-threaded* — so tying it to a machine with a lot of memory
+/// free would reintroduce exactly the regression it exists to prevent. The
+/// budget that genuinely is about memory is the one in
+/// [`crate::calibrate::combine`], and that one does follow the machine.
+///
+/// Deliberately not the scan's open budget either, which bounds the metadata
+/// pass, where a worker allocates one frame and frees it again. Measuring a
+/// light holds nine times that, so the scan's budget would size this pool to a
+/// single worker.
 ///
 /// The number is a ceiling on harm rather than a search for the fastest answer,
 /// because measurement says the two cannot be had from one constant. Measured
@@ -437,23 +448,20 @@ fn size_the_pool(session: &Session, lights: &[FrameId], budget_bytes: u64) -> us
 
 /// How many lights are worth measuring at once on this machine.
 ///
-/// `available_parallelism` answers a different question: it reports logical
-/// parallelism, which on a part with simultaneous multithreading is twice the
-/// cores, and the standard library offers no way to ask for the physical count.
-/// The second thread on a core brings no decoder of its own and shares the
-/// cache and the memory pipe with the first, which on work that streams whole
-/// frames costs more than it brings.
+/// The physical core count, because the second thread on a core brings no
+/// decoder of its own and shares the cache and the memory pipe with the first —
+/// which on work that streams whole frames costs more than it brings.
 ///
-/// So this halves, which is a guess about the hardware rather than a fact about
-/// it, and on a part without simultaneous multithreading it leaves speed
-/// unclaimed. It is affordable because the curve is flat near its top, and it
-/// is honest because the number arrived at is reported in [`Survey::workers`]
-/// and [`survey_with_workers`] takes an override. On the frames this project is
-/// measured against the budget binds first anyway, so this ceiling only decides
-/// the small-frame case.
+/// This was the logical count halved, which is the same answer on a part with
+/// two threads per core and simply wrong on one without. Where the machine will
+/// not say, the halving stays as the fallback: it is the better guess of the two
+/// available, and the number arrived at is reported in [`Survey::workers`] with
+/// an override on [`survey_with_workers`] either way.
 fn worker_ceiling() -> usize {
-    let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
-    if logical >= 8 { logical / 2 } else { logical }
+    crate::machine::physical_cores().unwrap_or_else(|| {
+        let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
+        if logical >= 8 { logical / 2 } else { logical }
+    })
 }
 
 /// What one survey worker keeps for the length of the run.

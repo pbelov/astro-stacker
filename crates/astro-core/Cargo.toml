@@ -11,5 +11,6 @@ authors.workspace = true
 astro-plugin-abi.workspace = true
 libloading.workspace = true
 rayon.workspace = true
+sysinfo.workspace = true
 log.workspace = true
 thiserror.workspace = true
