@@ -34,24 +34,34 @@ cargo build --release
 ```
 
 For a release you can hand to someone, `build.bat` runs the tests and clippy,
-builds, and stages a portable folder with the binary and its plugins into
-`build/`, beside a zip of the same:
+builds both the command line and the window, and stages a portable folder with
+the two of them and their plugins into `build/`, beside a zip of the same:
 
 ```
 build.bat
 ```
 
-The staging step is not packaging for its own sake. The binary reads no frame
-format on its own — every format arrives as a loadable library — so a build that
-forgot the plugins still starts, still prints its help, and silently reads
-nothing. The script therefore runs the staged binary and checks that it lists
-the Canon plugin before it calls the build done. `build.bat quick` skips the
-tests and clippy when you are only iterating.
+The staging step is not packaging for its own sake. Neither program reads a
+frame format on its own — every format arrives as a loadable library — so a build
+that forgot the plugins still starts, still prints its help, and silently reads
+nothing. The script therefore runs the staged binary and checks that it lists the
+Canon plugin before it calls the build done. Both programs search for plugins the
+same way, from the directory they are in, so one `plugins` folder serves both and
+one check covers the layout for both. What it does not cover is the window
+itself: it is a window, so a script cannot ask it anything, and it additionally
+wants WebView2 on whatever machine opens it.
+
+Building the window needs Node, since the interface is bundled into it before the
+binary is built. The script stages a portable executable rather than an
+installer; the installer is the same `tauri build` without `--no-bundle`, and is a
+different kind of delivery. `build.bat quick` skips the tests and clippy when you
+are only iterating.
 
 ## The window
 
 There is a desktop shell beside the command line, for looking at a session
-rather than reading it:
+rather than reading it. A staged build carries it as `astro-stacker-desktop.exe`;
+from source it runs like this:
 
 ```
 cd apps/desktop

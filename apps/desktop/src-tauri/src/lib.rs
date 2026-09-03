@@ -15,7 +15,12 @@
 //! mismatch means — all of that already has a home, and a second copy of it
 //! behind a window would be the copy that drifts.
 
-use std::path::{Path, PathBuf};
+// Only the development plugin search and the tests reach for `Path`, and
+// both are gone from a release build, which is what leaves the import unused
+// there.
+#[cfg(any(debug_assertions, test))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

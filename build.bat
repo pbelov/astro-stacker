@@ -7,6 +7,10 @@ rem ни одного формата кадра, форматы приходят подключаемыми библиотеками, и
 rem собранная папка должна лежать так, как их ищет хост. Проверка в конце
 rem запускает собранный бинарник и убеждается, что он свой плагин видит.
 rem
+rem В папку кладутся обе программы: командная строка и окно. Плагины у них
+rem общие - и то, и другое ищет их одинаково, сначала в подпапке plugins рядом
+rem с собой, потом рядом с собой, - поэтому одна папка plugins обслуживает оба.
+rem
 rem   build.bat         полная сборка: тесты, clippy, релиз, архив
 rem   build.bat quick   только релиз и архив, без проверок
 setlocal enabledelayedexpansion
@@ -17,6 +21,15 @@ set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 where cargo >nul 2>&1
 if not "%ERRORLEVEL%"=="0" (
   echo [ОШИБКА] cargo не найден в PATH. Установи Rust: https://rustup.rs
+  exit /b 1
+)
+
+rem Окно собирается через Tauri, а тот запускается из npm: фронтенд собирается
+rem до бинарника и попадает в него.
+where npm >nul 2>&1
+if not "%ERRORLEVEL%"=="0" (
+  echo [ОШИБКА] npm не найден в PATH. Он нужен для сборки окна.
+  echo          Установи Node.js: https://nodejs.org
   exit /b 1
 )
 
@@ -80,6 +93,20 @@ if not "%STEP_ERR%"=="0" (
   exit /b %STEP_ERR%
 )
 
+rem Окно - отдельный воркспейс со своим Cargo.lock, поэтому команда выше его
+rem не видит и его замечания оставались непрочитанными.
+echo.
+echo --- Clippy окна ---
+pushd apps\desktop\src-tauri
+cargo clippy --all-targets -- -D warnings
+set "STEP_ERR=%ERRORLEVEL%"
+popd
+if not "%STEP_ERR%"=="0" (
+  echo.
+  echo [ОШИБКА] clippy ругается на окно, код %STEP_ERR%
+  exit /b %STEP_ERR%
+)
+
 :build
 echo.
 echo --- Релиз ---
@@ -91,11 +118,42 @@ if not "%STEP_ERR%"=="0" (
   exit /b %STEP_ERR%
 )
 
+echo.
+echo --- Окно ---
+rem Зависимости фронтенда ставятся только если их нет: npm install при
+rem каждой сборке - это минуты на то, что уже лежит на диске.
+if not exist "apps\desktop\node_modules" (
+  echo   ставлю зависимости фронтенда
+  pushd apps\desktop
+  call npm install
+  set "STEP_ERR=!ERRORLEVEL!"
+  popd
+  if not "!STEP_ERR!"=="0" (
+    echo [ОШИБКА] npm install не прошёл, код !STEP_ERR!
+    exit /b !STEP_ERR!
+  )
+)
+
+rem --no-bundle: в папку нужен переносимый exe, а не установщик. Установщик
+rem собирается тем же tauri build без этого ключа, но это другая поставка.
+rem call обязателен: npm это .cmd, и без него batch сюда уже не вернётся.
+pushd apps\desktop
+call npm run tauri -- build --no-bundle
+set "STEP_ERR=!ERRORLEVEL!"
+popd
+if not "!STEP_ERR!"=="0" (
+  echo.
+  echo [ОШИБКА] сборка окна завершилась с кодом !STEP_ERR!
+  exit /b !STEP_ERR!
+)
+
 set "REL=target\release"
 set "EXE=%REL%\astro-stacker.exe"
 set "PLUGIN=%REL%\astro_format_canon.dll"
+rem У окна свой воркспейс, поэтому и target свой.
+set "GUI=apps\desktop\src-tauri\target\release\astro-stacker-desktop.exe"
 
-for %%f in ("%EXE%" "%PLUGIN%") do (
+for %%f in ("%EXE%" "%PLUGIN%" "%GUI%") do (
   if not exist "%%~f" (
     echo [ОШИБКА] не собралось: %%~f
     exit /b 1
@@ -116,11 +174,22 @@ if not "%ERRORLEVEL%"=="0" (
   echo [ОШИБКА] не удалось скопировать плагин
   exit /b 1
 )
+copy /y "%GUI%" "%STAGE%\" >nul
+if not "%ERRORLEVEL%"=="0" (
+  echo [ОШИБКА] не удалось скопировать окно
+  exit /b 1
+)
 if exist "README.md" copy /y "README.md" "%STAGE%\" >nul
 
 rem Настоящая проверка, а не формальность: бинарник без своего плагина
 rem запускается и работает - просто молча не читает ни одного формата кадра.
 rem Такую сборку можно отдать и узнать о поломке только от того, кто её открыл.
+rem
+rem Проверяется командная строка, но отвечает она за обе программы: плагины
+rem ищет общий код ядра, от каталога рядом с exe, а обе программы лежат в
+rem одном каталоге. Чего эта проверка не покрывает - окно само: оно оконное,
+rem из скрипта его не спросить, и ему вдобавок нужен WebView2 на машине, где
+rem его запустят.
 echo.
 echo --- Проверка ---
 "%STAGE%\astro-stacker.exe" plugins | findstr /i "canon" >nul
@@ -152,7 +221,8 @@ for %%f in ("%ZIP%") do (
 )
 echo   %STAGE%\  - распакованная папка, запускается прямо из неё
 echo.
-echo   astro-stacker.exe --help      список команд
-echo   astro-stacker.exe plugins     какие форматы читаются
+echo   astro-stacker.exe --help          список команд
+echo   astro-stacker.exe plugins         какие форматы читаются
+echo   astro-stacker-desktop.exe         окно
 echo.
 endlocal
