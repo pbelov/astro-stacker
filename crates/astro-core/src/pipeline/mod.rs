@@ -123,7 +123,7 @@ pub fn masters(
     plan: &StackPlan,
     options: &CombineOptions,
     wanted: Wanted,
-    on: &dyn Fn(Step) -> Flow,
+    on: &(dyn Fn(Step) -> Flow + Sync),
 ) -> Result<MasterSet> {
     let mut built = MasterSet::default();
     for (kind, matched) in [

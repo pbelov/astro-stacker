@@ -147,7 +147,7 @@ pub fn build(
     session: &Session,
     set: &FrameSet,
     options: &CombineOptions,
-    progress: &dyn Fn(usize, usize),
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Master> {
     let active: Vec<_> = set.members.iter().copied().filter(|id| session[*id].is_active()).collect();
     if active.is_empty() {

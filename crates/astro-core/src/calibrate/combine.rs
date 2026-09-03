@@ -19,7 +19,11 @@
 //! tenth of every pixel at eighty-five frames. A single pass at kappa 3 rejects
 //! 0.2%, which is what a rejection is supposed to cost.
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use astro_plugin_abi::abi::ImageLayout;
+use rayon::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::frame::Samples;
@@ -123,7 +127,7 @@ pub fn combine(
     session: &Session,
     frames: &[FrameId],
     options: &CombineOptions,
-    progress: &dyn Fn(usize, usize),
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Combined> {
     let Some(&first) = frames.first() else {
         return Err(Error::NothingToCombine);
@@ -163,6 +167,58 @@ pub fn combine(
     }
 }
 
+/// Photosites one worker takes at a time when folding the frames together.
+///
+/// Large enough that the per-band scratch row and the loop setup are lost in
+/// it, small enough that a machine's worth of workers still has bands to take
+/// when the last few are running long.
+const BAND: usize = 1 << 16;
+
+/// The pool a combination decodes on.
+///
+/// `None` where there is nothing to gain or the pool will not build, and the
+/// caller then reads the frames one at a time — which only costs speed. Sized
+/// to the physical cores rather than the logical ones, for the reason the survey
+/// gives: the second thread on a core brings no decoder of its own.
+fn pool(frames: usize) -> Option<rayon::ThreadPool> {
+    let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let workers = if logical >= 8 { logical / 2 } else { logical }.min(frames);
+    if workers <= 1 {
+        return None;
+    }
+    match rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
+        Ok(pool) => Some(pool),
+        Err(err) => {
+            log::warn!("combining on one thread: {err}");
+            None
+        }
+    }
+}
+
+/// Counts frames as they are finished and reports them, from any thread.
+///
+/// The count and the call happen under one lock. Incrementing atomically and
+/// then calling is not the same thing: two workers can be reordered between the
+/// two, and the line this drives is rewritten in place, so it would walk
+/// backwards.
+struct Reporter<'a> {
+    progress: &'a (dyn Fn(usize, usize) + Sync),
+    done: Mutex<usize>,
+    total: usize,
+}
+
+impl<'a> Reporter<'a> {
+    fn new(progress: &'a (dyn Fn(usize, usize) + Sync), total: usize) -> Self {
+        Self { progress, done: Mutex::new(0), total }
+    }
+
+    fn one(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *done += 1;
+        (self.progress)(*done, self.total);
+    }
+}
+
 /// What both strategies need to know about the frames they are combining.
 struct Shape<'a> {
     layout: &'a ImageLayout,
@@ -178,34 +234,74 @@ fn combine_resident(
     shape: &Shape<'_>,
     method: Method,
     options: &CombineOptions,
-    progress: &dyn Fn(usize, usize),
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Combined> {
     let (layout, pixels) = (shape.layout, shape.pixels);
+
+    // Decoded several at a time. Nothing about one frame depends on another,
+    // and this path is called resident precisely because every frame is going
+    // to be held anyway, so reading them at once costs no memory the pass was
+    // not already committed to.
+    let reported = Reporter::new(progress, frames.len());
+    let decoded: Vec<Result<Vec<u16>>> = match pool(frames.len()) {
+        Some(pool) => pool.install(|| {
+            frames
+                .par_iter()
+                .map(|&id| {
+                    let outcome = decode(host, session, id, pixels);
+                    reported.one();
+                    outcome
+                })
+                .collect()
+        }),
+        None => frames
+            .iter()
+            .map(|&id| {
+                let outcome = decode(host, session, id, pixels);
+                reported.one();
+                outcome
+            })
+            .collect(),
+    };
+    // Back in the order they were given. `par_iter().map().collect()` over a
+    // slice already keeps it, and this only turns the failures into one.
     let mut held: Vec<Vec<u16>> = Vec::with_capacity(frames.len());
-    for (index, &id) in frames.iter().enumerate() {
-        held.push(decode(host, session, id, pixels)?);
-        progress(index + 1, frames.len());
+    for outcome in decoded {
+        held.push(outcome?);
     }
 
     let mut out = vec![0f32; pixels];
-    let mut rejected = 0u64;
-    // One scratch row of values per pixel, reused: allocating per pixel would
-    // be nineteen million allocations.
-    let mut column = vec![0f32; held.len()];
+    let rejected = AtomicU64::new(0);
 
-    for (index, value) in out.iter_mut().enumerate() {
-        for (slot, frame) in column.iter_mut().zip(&held) {
-            *slot = f32::from(frame[index]);
-        }
-        match method {
-            Method::Median => *value = median(&mut column),
-            Method::ClippedMean => {
-                let (mean, dropped) = clipped_mean(&column, options.kappa);
-                *value = mean;
-                rejected += dropped;
+    // Every output photosite is a fold over the same photosite of each frame
+    // and depends on nothing else, so the run is cut into bands of them. The
+    // arithmetic within a photosite is untouched and in the same order, so the
+    // master is the same master.
+    out.par_chunks_mut(BAND).enumerate().for_each(|(band, values)| {
+        // One scratch row of values per photosite, reused down the band:
+        // allocating per photosite would be nineteen million allocations.
+        let mut column = vec![0f32; held.len()];
+        let mut dropped_here = 0u64;
+        for (offset, value) in values.iter_mut().enumerate() {
+            let index = band * BAND + offset;
+            for (slot, frame) in column.iter_mut().zip(&held) {
+                *slot = f32::from(frame[index]);
+            }
+            match method {
+                Method::Median => *value = median(&mut column),
+                Method::ClippedMean => {
+                    let (mean, dropped) = clipped_mean(&column, options.kappa);
+                    *value = mean;
+                    dropped_here += dropped;
+                }
             }
         }
-    }
+        // Counted per band and added once, for the reason the deposit counts
+        // that way: an atomic per photosite is threads queueing on one cache
+        // line for longer than the work they are counting takes.
+        rejected.fetch_add(dropped_here, Ordering::Relaxed);
+    });
+    let rejected = rejected.into_inner();
 
     Ok(Combined {
         pixels: out,
@@ -232,7 +328,7 @@ fn combine_streaming(
     frames: &[FrameId],
     shape: &Shape<'_>,
     options: &CombineOptions,
-    progress: &dyn Fn(usize, usize),
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Combined> {
     let (layout, pixels) = (shape.layout, shape.pixels);
     let total = frames.len() * 2;
@@ -242,12 +338,20 @@ fn combine_streaming(
     for (index, &id) in frames.iter().enumerate() {
         let frame = decode(host, session, id, pixels)?;
         let count = (index + 1) as f32;
-        for ((mean, m2), sample) in mean.iter_mut().zip(&mut m2).zip(&frame) {
-            let value = f32::from(*sample);
-            let delta = value - *mean;
-            *mean += delta / count;
-            *m2 += delta * (value - *mean);
-        }
+        // Banded, not because one frame's fold is parallel — it is strictly
+        // sequential in the frames — but because every photosite's fold is
+        // independent of every other's. Each photosite still sees the frames in
+        // the order they were given, which is what a running mean needs.
+        mean.par_chunks_mut(BAND).zip(m2.par_chunks_mut(BAND)).zip(frame.par_chunks(BAND)).for_each(
+            |((mean, m2), frame)| {
+                for ((mean, m2), sample) in mean.iter_mut().zip(m2).zip(frame) {
+                    let value = f32::from(*sample);
+                    let delta = value - *mean;
+                    *mean += delta / count;
+                    *m2 += delta * (value - *mean);
+                }
+            },
+        );
         progress(index + 1, total);
     }
 
@@ -261,15 +365,21 @@ fn combine_streaming(
     let mut kept = vec![0u32; pixels];
     for (index, &id) in frames.iter().enumerate() {
         let frame = decode(host, session, id, pixels)?;
-        for (((sum, kept), (mean, tolerance)), sample) in
-            sum.iter_mut().zip(&mut kept).zip(mean.iter().zip(&m2)).zip(&frame)
-        {
-            let value = f32::from(*sample);
-            if (value - *mean).abs() <= *tolerance {
-                *sum += value;
-                *kept += 1;
-            }
-        }
+        sum.par_chunks_mut(BAND)
+            .zip(kept.par_chunks_mut(BAND))
+            .zip(mean.par_chunks(BAND).zip(m2.par_chunks(BAND)))
+            .zip(frame.par_chunks(BAND))
+            .for_each(|(((sum, kept), (mean, tolerance)), frame)| {
+                for (((sum, kept), (mean, tolerance)), sample) in
+                    sum.iter_mut().zip(kept).zip(mean.iter().zip(tolerance)).zip(frame)
+                {
+                    let value = f32::from(*sample);
+                    if (value - *mean).abs() <= *tolerance {
+                        *sum += value;
+                        *kept += 1;
+                    }
+                }
+            });
         progress(frames.len() + index + 1, total);
     }
 
