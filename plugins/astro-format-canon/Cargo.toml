@@ -3,7 +3,10 @@ name = "astro-format-canon"
 description = "Canon CR2/CR3 reader for astro-stacker"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Also not the workspace's, and for the same reason: this is the worked example
+# of a plugin, so it should need no more of a compiler than a plugin does. The
+# floor is rawler's rather than ours.
+rust-version = "1.88"
 license.workspace = true
 authors.workspace = true
 

@@ -8,9 +8,12 @@ members = [
 ]
 
 [workspace.package]
-version = "0.17.0"
+version = "0.17.1"
 edition = "2024"
-rust-version = "1.88"
+# The host's floor, and only the host's. It is free to follow what `astro-core`
+# depends on, because the crate a plugin author builds against declares its own
+# and does not inherit this one — see `crates/astro-plugin-abi`.
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 authors = ["Pavel Belov <psbelov@gmail.com>"]
 
@@ -27,7 +30,7 @@ rawler = "0.7"
 rayon = "1"
 # Only the `system` half: this is asked two questions, how much memory is free
 # and how many cores are physical, and neither wants processes or disks.
-sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = "2"
 
 [profile.release]

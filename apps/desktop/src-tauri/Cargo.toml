@@ -1,9 +1,9 @@
 [package]
 name = "astro-stacker-desktop"
 description = "Desktop shell for astro-stacker (Tauri 2)"
-version = "0.17.0"
+version = "0.17.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 authors = ["Pavel Belov <psbelov@gmail.com>"]
 
