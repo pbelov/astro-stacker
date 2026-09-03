@@ -42,17 +42,39 @@ pub const MEDIAN_CEILING: usize = 25;
 /// throw away the tail of the noise the master exists to average down.
 pub const KAPPA: f32 = 3.0;
 
-/// How much decoded pixel data may be resident while a master is combined.
+/// How much a combination may hold, where the machine will not say how much
+/// memory it has.
 ///
 /// Below this the frames are all held and each is read once; above it the
 /// combination streams and reads every frame twice.
+pub const FALLBACK_RESIDENT_BYTES: u64 = 2 << 30;
+
+/// The share of the machine's memory a combination may work in.
 ///
-/// A constant, and deliberately not a share of what [`crate::machine`] reports
-/// free — which is what it wants to be, and what it cannot be until the two
-/// paths agree about how they estimate a spread. See the note in
-/// [`clipped_mean`]: while they disagree, letting this follow the machine would
-/// mean a master built on a busy machine differs from one built on an idle one.
-pub const DEFAULT_RESIDENT_BYTES: u64 = 2 << 30;
+/// An eighth, and deliberately a small one. This is cut from what the machine
+/// *has* rather than from what is free at the moment — see
+/// [`crate::machine::total_bytes`] for why the more useful number is the wrong
+/// one — so the share has to leave room for everything the run is doing besides
+/// this combination, including the masters it has already finished and is still
+/// holding.
+const RESIDENT_SHARE: u64 = 8;
+
+/// What one photosite of a held frame costs beyond the frames themselves, as a
+/// multiple of a frame's raw bytes.
+///
+/// Two for the `f32` output the fold writes into, and two more for each frame a
+/// worker is decoding at the time. A budget that counted only the frames it
+/// means to hold would grant a share and then exceed it, which is the failure
+/// the streaming path exists to prevent — so the test is made against what the
+/// pass actually peaks at.
+const OUTPUT_MULTIPLE_OF_RAW: u64 = 2;
+const DECODE_MULTIPLE_OF_RAW: u64 = 2;
+
+/// What this machine allows a combination to hold.
+pub fn resident_budget_bytes() -> u64 {
+    crate::machine::total_bytes()
+        .map_or(FALLBACK_RESIDENT_BYTES, |total| (total / RESIDENT_SHARE).max(FALLBACK_RESIDENT_BYTES))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -115,7 +137,7 @@ pub struct CombineOptions {
 
 impl Default for CombineOptions {
     fn default() -> Self {
-        Self { method: None, kappa: KAPPA, resident_bytes: DEFAULT_RESIDENT_BYTES }
+        Self { method: None, kappa: KAPPA, resident_bytes: resident_budget_bytes() }
     }
 }
 
@@ -160,21 +182,35 @@ pub fn combine(
 
     let method = options.method.unwrap_or_else(|| Method::for_frames(frames.len()));
     let frame_bytes = (pixels * size_of::<u16>()) as u64;
-    // A set small enough to be combined by the median is held whatever the
-    // budget says. The streaming path cannot take a median — it would need every
-    // value at a photosite at once, which is the thing it exists to avoid — so
-    // it always clips, and a budget that pushed a small set into it would change
-    // the master's method without being asked to. That is a decision about the
-    // arithmetic, and a decision about the arithmetic must not be made by how
-    // much memory happened to be free. The ceiling this floors against is the
-    // same one the method is chosen by, so the two cannot disagree.
-    let budget = options.resident_bytes.max((MEDIAN_CEILING as u64).saturating_mul(frame_bytes));
-    let resident = frames.len() as u64 * frame_bytes <= budget;
+    // A set that is to be combined by the median is held whatever the budget
+    // says. The streaming path cannot take a median — it would need every value
+    // at a photosite at once, which is the thing it exists to avoid — so a
+    // budget that pushed such a set into it would change the master's method
+    // without being asked to, and that is a decision about the arithmetic rather
+    // than about memory.
+    let held = if matches!(method, Method::Median) {
+        frames.len() as u64
+    } else {
+        MEDIAN_CEILING as u64
+    };
+    let floor = held.saturating_mul(frame_bytes);
+    // What the resident path actually peaks at, rather than only the frames it
+    // means to hold: the fold's own output, and a decode in flight per worker.
+    let workers = decode_workers(frames.len()) as u64;
+    let overhead =
+        (OUTPUT_MULTIPLE_OF_RAW + workers.saturating_mul(DECODE_MULTIPLE_OF_RAW)) * frame_bytes;
+    let wanted = (frames.len() as u64).saturating_mul(frame_bytes).saturating_add(overhead);
+    let resident = wanted <= options.resident_bytes.max(floor.saturating_add(overhead));
 
     let shape = Shape { layout: &layout, pixels };
     if resident {
         combine_resident(host, session, frames, &shape, method, options, progress)
     } else {
+        // Never a median: the floor above holds any set that is to be combined
+        // by one, so this arm is only ever reached for a clipped mean. Asserted
+        // rather than trusted, because the streaming path has no way to honour a
+        // median and used to answer with a clipped mean instead.
+        debug_assert!(matches!(method, Method::ClippedMean), "a median cannot be streamed");
         combine_streaming(host, session, frames, &shape, options, progress)
     }
 }
@@ -192,12 +228,16 @@ const BAND: usize = 1 << 16;
 /// caller then reads the frames one at a time — which only costs speed. Sized
 /// to the physical cores rather than the logical ones, for the reason the survey
 /// gives: the second thread on a core brings no decoder of its own.
-fn pool(frames: usize) -> Option<rayon::ThreadPool> {
+fn decode_workers(frames: usize) -> usize {
     let cores = crate::machine::physical_cores().unwrap_or_else(|| {
         let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
         if logical >= 8 { logical / 2 } else { logical }
     });
-    let workers = cores.min(frames);
+    cores.min(frames).max(1)
+}
+
+fn pool(frames: usize) -> Option<rayon::ThreadPool> {
+    let workers = decode_workers(frames);
     if workers <= 1 {
         return None;
     }
@@ -457,18 +497,19 @@ fn median(values: &mut [f32]) -> f32 {
 fn clipped_mean(values: &[f32], kappa: f32) -> (f32, u64) {
     let count = values.len() as f32;
     let mean = values.iter().sum::<f32>() / count;
-    // NOTE: this divides by `n` while `combine_streaming` divides by `n - 1`,
-    // so the two paths estimate the spread differently and reject different
-    // samples — and which path a set takes is decided by whether it fits in
-    // memory. Measured on a real eighty-five frame set the difference is 0.2999%
-    // of samples rejected against 0.3153%, and masters differing by up to 427
-    // ADU where a rejection went the other way. Unifying them on `n - 1` moves
-    // every clipped-mean master and every stack built through one, so it is not
-    // done here; until it is, the resident budget must stay a constant, because
-    // a budget that followed free memory would let the machine's load decide
-    // which estimator a set got.
-    let variance =
-        values.iter().map(|value| (value - mean) * (value - mean)).sum::<f32>() / count.max(1.0);
+    // Over `n - 1`, not `n`. The mean subtracted here was estimated from these
+    // same values, so a degree of freedom has already been spent on it and
+    // dividing by the count understates the spread — which tightens the
+    // threshold and drops samples that are not outliers. It is also the
+    // estimator this module's own reasoning is written in: the relative error
+    // quoted at the top is `1/sqrt(2(n-1))`.
+    //
+    // And it has to match [`combine_streaming`], which has always divided by
+    // `n - 1`. The two combine the same frames and which one runs is decided by
+    // whether the set fits in memory, so while they disagreed, how much memory
+    // was free decided how much of a set was rejected.
+    let variance = values.iter().map(|value| (value - mean) * (value - mean)).sum::<f32>()
+        / (count - 1.0).max(1.0);
     let tolerance = variance.sqrt() * kappa;
 
     let mut sum = 0f32;
@@ -480,7 +521,13 @@ fn clipped_mean(values: &[f32], kappa: f32) -> (f32, u64) {
         }
     }
     if kept == 0 {
-        (mean, 0)
+        // A photosite where everything was rejected keeps its unclipped mean
+        // rather than becoming a zero or a NaN, as the streaming path does — but
+        // it is reported as wholly rejected, because it was. Saying nothing was
+        // dropped here would hide the one condition the rejection percentage
+        // exists to expose, and would disagree with the other path about a set
+        // it is only running instead of because of a memory budget.
+        (mean, values.len() as u64)
     } else {
         (sum / kept as f32, (values.len() - kept as usize) as u64)
     }
@@ -489,6 +536,86 @@ fn clipped_mean(values: &[f32], kappa: f32) -> (f32, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One photosite through the streaming path, written out longhand.
+    ///
+    /// Not a second opinion about what the answer should be — a transcription of
+    /// what `combine_streaming` does to one photosite, so that the two paths can
+    /// be held against each other without decoding a frame.
+    fn streaming_at_one_photosite(values: &[f32], kappa: f32) -> (f32, u64) {
+        let (mut mean, mut m2) = (0f32, 0f32);
+        for (index, value) in values.iter().enumerate() {
+            let count = (index + 1) as f32;
+            let delta = value - mean;
+            mean += delta / count;
+            m2 += delta * (value - mean);
+        }
+        let divisor = (values.len().saturating_sub(1)).max(1) as f32;
+        let tolerance = (m2 / divisor).max(0.0).sqrt() * kappa;
+
+        let (mut sum, mut kept) = (0f32, 0u32);
+        for value in values {
+            if (value - mean).abs() <= tolerance {
+                sum += value;
+                kept += 1;
+            }
+        }
+        let combined = if kept == 0 { mean } else { sum / kept as f32 };
+        (combined, (values.len() - kept as usize) as u64)
+    }
+
+    #[test]
+    fn both_paths_reject_the_same_samples() {
+        // The property that matters, and the one that was broken: which path a
+        // set takes is decided by whether it fits in memory, so if the two
+        // disagree then how much memory was free decides how much of a set is
+        // rejected. They cannot be bit-identical — one sums and the other
+        // accumulates a running mean — but they must throw away the same
+        // samples, which is the decision a master is actually made of.
+        let mut state = 0x853c_49e6_748f_ea9bu64;
+        let mut noise = move || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (state >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        for count in [2usize, 3, 11, 25, 40, 85, 200] {
+            for outliers in [0usize, 1, 3] {
+                let mut values: Vec<f32> =
+                    (0..count).map(|_| 2050.0 + noise() * 12.0).collect();
+                for index in 0..outliers.min(count) {
+                    values[index * 7 % count] += 4000.0;
+                }
+                let (mine, dropped) = clipped_mean(&values, KAPPA);
+                let (theirs, dropped_streaming) = streaming_at_one_photosite(&values, KAPPA);
+                assert_eq!(
+                    dropped, dropped_streaming,
+                    "{count} values, {outliers} outliers: the paths rejected different counts"
+                );
+                // Loose, because the two accumulate differently. What is being
+                // asserted is that they agree about the answer, not that they
+                // reach it the same way; the counts above are the strict part.
+                assert!(
+                    (mine - theirs).abs() <= 0.01,
+                    "{count} values, {outliers} outliers: {mine} against {theirs}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_paths_agree_where_nothing_survives_the_clip() {
+        // A photosite where the clip keeps nothing. A zero kappa reaches it on
+        // purpose; in a real run it is a photosite whose spread is zero and
+        // whose values floating point puts a hair outside their own threshold.
+        // Both paths fall back to the plain mean there, and both have to say the
+        // same thing about it — a photosite reported as wholly rejected by one
+        // path and not at all by the other moves the rejection percentage the
+        // user reads, and that percentage is how a bad threshold is spotted.
+        let values: Vec<f32> = (0..40).map(|i| 2048.0 + i as f32).collect();
+        let (mine, dropped) = clipped_mean(&values, 0.0);
+        let (theirs, dropped_streaming) = streaming_at_one_photosite(&values, 0.0);
+        assert_eq!(mine, theirs, "the value written");
+        assert_eq!(dropped, dropped_streaming, "the count reported");
+    }
 
     #[test]
     fn the_median_is_taken_below_the_crossover_and_the_clipped_mean_above() {

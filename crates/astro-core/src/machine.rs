@@ -23,19 +23,23 @@ pub fn physical_cores() -> Option<usize> {
     sysinfo::System::physical_core_count().filter(|count| *count > 0)
 }
 
-/// Physical memory not currently spoken for, in bytes.
+/// How much physical memory the machine has, in bytes.
 ///
-/// Available and not total: what matters to a pass deciding whether to hold its
-/// frames is what it can take without pushing something else out, and a machine
-/// with a browser open has less of it than its specification says.
+/// Total and deliberately not available. Free memory is the more useful number
+/// and the wrong one: it is a fact about the moment rather than about the
+/// machine, it falls as a run proceeds and every finished master stays resident,
+/// and a budget cut from it would send two identically sized sets down different
+/// paths depending on which was built first, or on what else was open. A
+/// combination that took the median on Tuesday and the clipped mean on Wednesday
+/// is not a pipeline anybody can reason about.
 ///
-/// It follows that this moves between runs, so nothing that changes an *answer*
-/// may depend on it — only how the answer is arrived at. See
-/// [`crate::calibrate::combine`], where that distinction decides where the
-/// budget's floor is.
-pub fn available_bytes() -> Option<u64> {
+/// So this is the machine's specification, which two runs of the same command
+/// agree about. What guards against actually exhausting memory is the share
+/// taken of it and the fact that the pass models its own peak — see
+/// [`crate::calibrate::combine`].
+pub fn total_bytes() -> Option<u64> {
     let mut system = sysinfo::System::new();
     system.refresh_memory();
-    let available = system.available_memory();
-    (available > 0).then_some(available)
+    let total = system.total_memory();
+    (total > 0).then_some(total)
 }

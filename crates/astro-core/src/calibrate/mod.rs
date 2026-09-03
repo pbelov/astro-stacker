@@ -89,12 +89,26 @@ impl Master {
     }
 
     pub fn header(&self) -> fits::Header {
-        let mut notes = vec![format!(
-            "{} frames, {}, {:.4}% of samples rejected",
-            self.frames,
-            self.method.name(),
-            self.rejected_fraction() * 100.0
-        )];
+        // The rejection line only where a rejection ran. A median throws nothing
+        // away, and "0.0000% of samples rejected" in the header of one is a rule
+        // that never fired wearing the clothes of a rule that fired and found
+        // nothing.
+        let mut notes = match self.method {
+            Method::Median => vec![format!("{} frames, {}", self.frames, self.method.name())],
+            Method::ClippedMean => vec![format!(
+                "{} frames, {}, {:.4}% of samples rejected",
+                self.frames,
+                self.method.name(),
+                self.rejected_fraction() * 100.0
+            )],
+        };
+        // Which path combined it. The two do not agree to the last bit, so a
+        // master that does not say which one made it cannot be reproduced from
+        // its own file.
+        notes.push(
+            if self.resident { "combined from frames held at once" } else { "combined by streaming in two passes" }
+                .to_owned(),
+        );
         if let Some(pedestal) = &self.pedestal {
             notes.push(format!(
                 "pedestal {:.2} ADU from {}",
