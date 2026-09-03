@@ -334,12 +334,18 @@ buffered to restore it.
 Each lane owns two full-frame buffers and hands them back after the deposit has
 read them, so the pass holds a fixed amount however long the run is. The count is
 derived from the frame size, and the argument that it should be small — that the
-deposit already has every core, so a lane can only take one from it — is wrong,
-which is worth recording because it is the obvious argument. The band split
-floors its height, so a frame is cut into a few dozen bands rather than one per
-worker, and the tail of that split leaves part of the machine idle for a share of
-every frame. Measurement puts the flattening point around eight lanes rather than
-the two or three the wrong argument predicts.
+deposit already has every core, so a lane can only take one from it — is wrong:
+measurement puts the flattening point around eight lanes rather than the two or
+three that argument predicts.
+
+Why it is wrong is not known, and the first answer written here was itself wrong,
+which is the part worth recording. It said the deposit's band split leaves the
+machine part idle and a lane fills the gap. Cutting a frame into anywhere from
+thirty-two bands to two hundred and fifty-six then moved the pass by less than
+its own run-to-run spread, so the band split is not what leaves room — and by the
+same token that constant is not worth tuning. What is left is that the deposit is
+limited by something other than the cores it occupies, and a thread that is only
+decoding does not compete with it for whatever that is.
 
 The worker count is derived from a memory budget and a core ceiling rather than
 chosen, and it is reported alongside the run, because it is a guess about the

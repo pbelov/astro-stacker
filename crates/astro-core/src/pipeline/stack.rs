@@ -413,18 +413,21 @@ const LANE_MULTIPLE_OF_RAW: u64 = 1 + 2 * PLANES_PER_LANE as u64;
 /// How many frames may be decoded ahead of the deposit.
 ///
 /// The tempting argument is that the deposit already spreads over every core, so
-/// a lane must be a thread taken from it. Measurement says otherwise, and it is
-/// worth writing down why: `Stack::add` floors its band height, so a frame is
-/// cut into a few dozen bands rather than into one per worker, and the tail of
-/// that split leaves part of the machine idle for a share of every frame. A lane
-/// fills idle capacity rather than competing for busy capacity, which is why
-/// this is eight and not the two or three the tempting argument predicts. The
-/// gain flattens where there is no idle left to fill.
+/// a lane must be a thread taken from it and two or three is all that can pay.
+/// Measurement says eight, and it is worth saying plainly that the reason is not
+/// known. The explanation this comment first offered was the deposit's band
+/// split leaving the machine part idle. That has since been tested by cutting a
+/// frame into anywhere from thirty-two bands to two hundred and fifty-six, which
+/// moved the pass by less than its own run-to-run spread — so the band split is
+/// not it, and the sentence is gone rather than reworded. What is left is that
+/// the deposit is limited by something other than the cores it occupies, and a
+/// thread that is only decoding does not compete with it for that.
 ///
-/// Where that falls depends on how a frame's cost divides between its decode and
-/// its deposit, which moves with the body and with the canvas — hence the
-/// override on [`combine_with_look_ahead`] and the number reported in
-/// [`Stacked::look_ahead`].
+/// Where the gain flattens depends on how a frame's cost divides between its
+/// decode and its deposit, which moves with the body and with the canvas — hence
+/// the override on [`combine_with_look_ahead`] and the number reported in
+/// [`Stacked::look_ahead`]. Eight is where it flattened on the body this project
+/// is measured against; it is a measurement on one machine, not a law.
 const MAX_LOOK_AHEAD: usize = 8;
 
 /// Cap on decoded pixel data held ahead of the deposit.
