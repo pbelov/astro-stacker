@@ -52,6 +52,15 @@ pub const DEFAULT_OPEN_BUDGET_BYTES: u64 = 512 << 20;
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub rules: Vec<RoleRule>,
+    /// Whether a folder's subfolders are read as well. Off by default.
+    ///
+    /// A subfolder inside a folder of lights is, far more often than not,
+    /// where the frames that should *not* be stacked were put — the framing
+    /// shots, the ones with a satellite, the tests at other settings. Reading
+    /// it assigns all of them the folder's kind, and the ones that happen to
+    /// share the run's exposure and gain cannot be told apart from it by
+    /// anything a frame records, so they join the stack without a word. A
+    /// frame the user set aside must stay aside; one they want can be named.
     pub recursive: bool,
     pub open_budget_bytes: u64,
     /// Read folder and file names as evidence. Proposals only; nothing is
@@ -69,7 +78,7 @@ impl Default for ScanOptions {
     fn default() -> Self {
         Self {
             rules: Vec::new(),
-            recursive: true,
+            recursive: false,
             open_budget_bytes: DEFAULT_OPEN_BUDGET_BYTES,
             infer_from_paths: true,
             excluded: Vec::new(),

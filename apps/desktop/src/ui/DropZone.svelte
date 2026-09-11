@@ -12,18 +12,22 @@
     paths = $bindable([]),
     hot = false,
     browseLabel,
+    filesLabel,
     clearLabel,
     countLabel,
     onbrowse,
+    onfiles,
   }: {
     label: string;
     hint: string;
     paths: string[];
     hot?: boolean;
     browseLabel: string;
+    filesLabel: string;
     clearLabel: string;
     countLabel: (n: number) => string;
     onbrowse: () => void;
+    onfiles: () => void;
   } = $props();
 
   const tail = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? path;
@@ -48,7 +52,13 @@
     </ul>
   {/if}
 
-  <button class="browse" onclick={onbrowse}>{browseLabel}</button>
+  <!-- Папки и отдельные файлы. Папка читается без подпапок, так что кадр,
+       отложенный в подпапку, туда и не вернётся; нужный кадр оттуда можно
+       добавить поштучно. -->
+  <div class="browse">
+    <button onclick={onbrowse}>{browseLabel}</button>
+    <button onclick={onfiles}>{filesLabel}</button>
+  </div>
 </div>
 
 <style>
@@ -122,7 +132,11 @@
     border-color: var(--accent);
   }
   .browse {
+    display: flex;
+    gap: 6px;
     align-self: flex-start;
+  }
+  .browse button {
     font-size: 12px;
   }
   .ghost {

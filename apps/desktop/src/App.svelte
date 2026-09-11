@@ -172,6 +172,17 @@
     add(role, Array.isArray(picked) ? picked : [picked]);
   }
 
+  // Поштучно, для кадров, которые не лежат одной папкой: часть серии, кадр из
+  // отложенной подпапки. Фильтр — то, что читают загруженные плагины, а не
+  // список, вшитый в окно: форматы здесь приходят плагинами.
+  async function browseFiles(role: Role) {
+    const filters =
+      formats.length > 0 ? [{ name: i18n.t("framesFilter"), extensions: formats }] : undefined;
+    const picked = await open({ multiple: true, filters });
+    if (!picked) return;
+    add(role, Array.isArray(picked) ? picked : [picked]);
+  }
+
   async function scan() {
     if (!chosen || scanning) return;
     scanning = true;
@@ -357,9 +368,11 @@
               bind:paths={roots[role.id]}
               hot={hot === role.id}
               browseLabel={i18n.t("browse")}
+              filesLabel={i18n.t("browseFiles")}
               clearLabel={i18n.t("clear")}
-              countLabel={(n) => (n === 1 ? i18n.t("pathChosen") : i18n.t("pathsChosen", { n }))}
+              countLabel={(n) => i18n.t("pathsChosen", { n })}
               onbrowse={() => browse(role.id)}
+              onfiles={() => browseFiles(role.id)}
             />
           </div>
         {/each}

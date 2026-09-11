@@ -45,9 +45,11 @@ pub struct ScanArgs {
     #[arg(long, id = "group", value_name = "NAME")]
     pub group: Vec<String>,
 
-    /// Do not descend into subdirectories.
-    #[arg(long = "no-recurse", id = "no_recurse")]
-    pub no_recurse: bool,
+    /// Also read the subdirectories of every directory given. Off by default:
+    /// a subdirectory inside a folder of lights is usually where the frames
+    /// that should not be stacked were put.
+    #[arg(long)]
+    pub recurse: bool,
 
     /// Do not read folder and file names as evidence.
     #[arg(long = "no-infer", id = "no_infer")]
@@ -101,7 +103,7 @@ pub fn options_from(args: &ScanArgs, matches: &ArgMatches) -> Result<(ScanOption
 
     let options = ScanOptions {
         rules,
-        recursive: !args.no_recurse,
+        recursive: args.recurse,
         infer_from_paths: !args.no_infer,
         excluded: args.exclude.clone(),
         ..Default::default()

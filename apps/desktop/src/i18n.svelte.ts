@@ -28,30 +28,31 @@ const ru = {
   roleDarkFlats: "Дарк-флэты",
 
   dropHere: "Перетащи папку или файлы",
-  browse: "Выбрать…",
+  browse: "Папки…",
+  browseFiles: "Файлы…",
+  framesFilter: "Кадры",
   clear: "Очистить",
-  pathsChosen: "{n} путей",
-  pathChosen: "1 путь",
+  pathsChosen: "{n} {n:путь|пути|путей}",
 
   scan: "Прочитать сессию",
   scanning: "Читаю…",
   rescan: "Прочитать заново",
-  nothingToScan: "Укажи хотя бы одну папку с кадрами",
+  nothingToScan: "Укажи хотя бы одну папку или файл с кадрами",
 
   summary: "Сессия",
-  framesRead: "{n} кадров за {s} с",
+  framesRead: "{n} {n:кадр|кадра|кадров} за {s} с",
   setsFound: "Наборов: {n}",
   plansFound: "Готовых к сложению: {n}",
 
   sets: "Наборы",
-  setLine: "{kind}, {n} кадров",
+  setLine: "{kind}, {n} {n:кадр|кадра|кадров}",
   excludedOf: "{active} из {total} активны",
   exposure: "выдержка",
   iso: "ISO",
   seconds: "с",
 
   plan: "План сложения",
-  planLights: "Лайты: набор {set}, {n} кадров",
+  planLights: "Лайты: набор {set}, {n} {n:кадр|кадра|кадров}",
   calibration: "Калибровка",
   noCalibration: "Калибровка не подобрана",
   quality: "совпадение",
@@ -89,13 +90,13 @@ const ru = {
   buildingMaster: "Мастер-{kind}: {done} из {total}",
   measuringFrame: "Кадр {done} из {total} — {name}",
   measureSlow: "Каждый кадр декодируется, калибруется и просматривается на звёзды. Считай примерно полсекунды на кадр — прогон в пару сотен займёт минуты.",
-  stoppedEarly: "Остановлено: измерено {n} кадров, это часть прогона, а не весь он.",
+  stoppedEarly: "Остановлено: {n:измерен|измерено|измерено} {n} {n:кадр|кадра|кадров}, это часть прогона, а не весь он.",
 
   runAsWhole: "Прогон целиком",
   statFwhm: "Ширина",
   statTrail: "Смаз",
   statStars: "Звёзд",
-  starsCapped: "{n} кадров упёрлись в потолок {cap}, так что это нижние оценки",
+  starsCapped: "{n} {n:кадр упёрся|кадра упёрлись|кадров упёрлись} в потолок {cap}, так что это нижние оценки",
   directionIs: "Смаз направлен на {deg}, согласие {agree} —",
   directionTracking: "одно направление во всех кадрах: это скорость ведения, а не ветер.",
   directionMixed: "в основном одно направление, но часть кадров ушла в сторону.",
@@ -145,11 +146,11 @@ const ru = {
   noResultYet: "Здесь появится изображение, когда сложение пройдёт.",
   whatWasStacked: "Что сложилось",
   statFrames: "Кадров",
-  effectiveDepth: "по глубине это {n} кадров медианного качества",
+  effectiveDepth: "по глубине это {n} {n:кадр|кадра|кадров} медианного качества",
   statCanvas: "Холст",
   statTook: "Заняло",
   coverage: "Покрытие по плоскостям",
-  depthAt: "{median} кадров вглубь по медиане, {thin} в самой тонкой десятой",
+  depthAt: "{median} {median:кадр|кадра|кадров} вглубь по медиане, {thin} в самой тонкой десятой",
   written: "Записано",
   refused: "Отклонены",
   lightestWeights: "С наименьшим весом",
@@ -167,7 +168,7 @@ const ru = {
   passOf: "проход {pass} из {passes}",
 
   suspicions: "На что стоит посмотреть",
-  sMinority: "Набор {set}: {a} кадров против {b} в основной серии — похоже на пробы",
+  sMinority: "Набор {set}: {a} {a:кадр|кадра|кадров} с другими настройками съёмки против {b} в основной серии — похоже на пробные снимки",
   sBiasNotShortest: "Набор {set}: биасы по {a} с, а самая короткая выдержка {b} с",
   sFlatNeedsDarkFlats: "Набор {set}: флэты по {a} с — стоит снять дарк-флэты",
   sInCameraDark: "Набор {set}: интервал {a} с при выдержке {b} с — похоже на внутрикамерное вычитание тёмного",
@@ -212,30 +213,31 @@ const en: Record<Keys, string> = {
   roleDarkFlats: "Dark flats",
 
   dropHere: "Drop a folder or files here",
-  browse: "Browse…",
+  browse: "Folders…",
+  browseFiles: "Files…",
+  framesFilter: "Frames",
   clear: "Clear",
-  pathsChosen: "{n} paths",
-  pathChosen: "1 path",
+  pathsChosen: "{n} {n:path|paths}",
 
   scan: "Read the session",
   scanning: "Reading…",
   rescan: "Read again",
-  nothingToScan: "Point it at least at one folder of frames",
+  nothingToScan: "Point it at least at one folder or file of frames",
 
   summary: "Session",
-  framesRead: "{n} frames in {s} s",
+  framesRead: "{n} {n:frame|frames} in {s} s",
   setsFound: "Sets: {n}",
   plansFound: "Ready to stack: {n}",
 
   sets: "Sets",
-  setLine: "{kind}, {n} frames",
+  setLine: "{kind}, {n} {n:frame|frames}",
   excludedOf: "{active} of {total} active",
   exposure: "exposure",
   iso: "ISO",
   seconds: "s",
 
   plan: "Stacking plan",
-  planLights: "Lights: set {set}, {n} frames",
+  planLights: "Lights: set {set}, {n} {n:frame|frames}",
   calibration: "Calibration",
   noCalibration: "No calibration matched",
   quality: "match",
@@ -273,13 +275,13 @@ const en: Record<Keys, string> = {
   buildingMaster: "Master {kind}: {done} of {total}",
   measuringFrame: "Frame {done} of {total} — {name}",
   measureSlow: "Every frame is decoded, calibrated and searched for stars. Reckon on about half a second each, so a run of a couple of hundred takes minutes.",
-  stoppedEarly: "Stopped: {n} frames measured, which is part of a run and not the whole of one.",
+  stoppedEarly: "Stopped: {n} {n:frame|frames} measured, which is part of a run and not the whole of one.",
 
   runAsWhole: "The run as a whole",
   statFwhm: "Width",
   statTrail: "Trail",
   statStars: "Stars",
-  starsCapped: "{n} frames hit the {cap} ceiling, so these are floors",
+  starsCapped: "{n} {n:frame|frames} hit the {cap} ceiling, so these are floors",
   directionIs: "Trailing points at {deg}, agreement {agree} —",
   directionTracking: "one direction in every frame: a tracking rate, not the wind.",
   directionMixed: "mostly one direction, with frames that wandered.",
@@ -329,11 +331,11 @@ const en: Record<Keys, string> = {
   noResultYet: "The image appears here once a stack has run.",
   whatWasStacked: "What was stacked",
   statFrames: "Frames",
-  effectiveDepth: "worth {n} frames of median quality",
+  effectiveDepth: "worth {n} {n:frame|frames} of median quality",
   statCanvas: "Canvas",
   statTook: "Took",
   coverage: "Coverage per plane",
-  depthAt: "{median} frames deep at the median, {thin} at the thinnest tenth",
+  depthAt: "{median} {median:frame|frames} deep at the median, {thin} at the thinnest tenth",
   written: "Written",
   refused: "Refused",
   lightestWeights: "Lightest weights",
@@ -351,7 +353,7 @@ const en: Record<Keys, string> = {
   passOf: "pass {pass} of {passes}",
 
   suspicions: "Worth a look",
-  sMinority: "Set {set}: {a} frames against {b} in the main series — looks like tests",
+  sMinority: "Set {set}: {a} {a:frame|frames} shot at other settings against {b} in the main series — looks like test shots",
   sBiasNotShortest: "Set {set}: biases at {a} s, but the shortest exposure is {b} s",
   sFlatNeedsDarkFlats: "Set {set}: flats at {a} s — worth shooting dark flats",
   sInCameraDark:
@@ -389,6 +391,23 @@ function initial(): Locale {
   return navigator.language.startsWith("ru") ? "ru" : "en";
 }
 
+/**
+ * Какую из форм слова требует число.
+ *
+ * Русский различает три: на 1 (кроме 11), на 2–4 (кроме 12–14) и остальные.
+ * Дробное число, как «4,4», согласуется со второй — «4,4 кадра», — и так же
+ * число, которое не удалось прочитать: из трёх это наименее странная.
+ */
+function agree(locale: Locale, n: number, forms: string[]): string {
+  const pick = (i: number) => forms[Math.min(i, forms.length - 1)];
+  if (locale !== "ru") return pick(n === 1 ? 0 : 1);
+  if (!Number.isInteger(n)) return pick(1);
+  const [ten, hundred] = [Math.abs(n) % 10, Math.abs(n) % 100];
+  if (ten === 1 && hundred !== 11) return pick(0);
+  if (ten >= 2 && ten <= 4 && (hundred < 12 || hundred > 14)) return pick(1);
+  return pick(2);
+}
+
 class I18n {
   locale = $state<Locale>(initial());
 
@@ -398,12 +417,24 @@ class I18n {
     document.documentElement.lang = next;
   }
 
-  /** Один ключ со подстановками вида {name}. */
+  /**
+   * Одна строка с подстановками.
+   *
+   * `{name}` — значение как есть. `{name:форма|форма|форма}` — слово,
+   * согласованное с числом `name`: три формы для русского (один кадр, два
+   * кадра, пять кадров), две для английского. Согласование сделано здесь, а не
+   * в каждой строке, потому что «4 кадров» не опечатка одной строки — это то,
+   * что даёт любая строка, где число стоит перед словом без него.
+   */
   t(key: Keys, values: Record<string, string | number> = {}): string {
     const template = TABLES[this.locale][key] ?? TABLES.en[key] ?? key;
-    return template.replace(/\{(\w+)\}/g, (whole, name: string) =>
-      name in values ? String(values[name]) : whole,
-    );
+    return template
+      .replace(/\{(\w+):([^}]+)\}/g, (whole, name: string, forms: string) =>
+        name in values ? agree(this.locale, Number(values[name]), forms.split("|")) : whole,
+      )
+      .replace(/\{(\w+)\}/g, (whole, name: string) =>
+        name in values ? String(values[name]) : whole,
+      );
   }
 }
 
