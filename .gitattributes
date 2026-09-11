@@ -4,3 +4,8 @@
 *.rs text
 *.toml text
 *.md text
+
+# A batch file is checked out with CRLF whatever the local git settings say:
+# cmd.exe finds `call :label` and `goto :label` unreliably in a file with bare
+# LF endings, and build.bat depends on both.
+*.bat text eol=crlf
