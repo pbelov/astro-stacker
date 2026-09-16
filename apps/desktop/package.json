@@ -1,7 +1,6 @@
 {
   "name": "astrostacker-ui",
   "private": true,
-  "version": "0.20.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
