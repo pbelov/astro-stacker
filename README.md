@@ -158,7 +158,8 @@ compiler, or written in another language, and keep working. Strings are UTF-8
 and paths carry no platform-native encoding, which is what will make Linux and
 macOS support a port rather than a rewrite. Builds and testing target Windows 11
 for now. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the decisions and
-why they were made.
+why they were made, and [docs/BACKLOG.md](docs/BACKLOG.md) for what is agreed to
+be worth doing next.
 
 ## Licence
 
