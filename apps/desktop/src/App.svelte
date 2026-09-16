@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import { onDestroy, onMount } from "svelte";
 
   import DropZone from "./ui/DropZone.svelte";
@@ -95,6 +96,7 @@
   let aboutOpen = $state(false);
   let version = $state("");
   let formats = $state<string[]>([]);
+  let logPath = $state("");
 
   let roots = $state<Record<Role, string[]>>({
     lights: [],
@@ -128,6 +130,9 @@
     void (async () => {
       version = await invoke<string>("app_version");
       formats = await invoke<string[]>("formats");
+      // Может не получиться, и это не повод ничем не открыться: без пути
+      // просто не будет кнопки.
+      logPath = await invoke<string>("log_file").catch(() => "");
 
       // Перетаскивание в Tauri приходит событием окна с координатами, а не в
       // DOM, поэтому попадание в корзину считается здесь по её прямоугольнику.
@@ -531,6 +536,14 @@
       {#if formats.length > 0}
         <p class="muted">{i18n.t("formatsRead", { list: formats.join(", ") })}</p>
       {/if}
+      {#if logPath}
+        <p class="muted log">
+          <span class="num" title={logPath}>{i18n.t("logKept")}</span>
+          <button class="ghost" onclick={() => void revealItemInDir(logPath)}>
+            {i18n.t("showLog")}
+          </button>
+        </p>
+      {/if}
       <button class="primary" onclick={() => (aboutOpen = false)}>{i18n.t("close")}</button>
     </div>
   </div>
@@ -771,6 +784,18 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  /* Строка про лог держит кнопку рядом с текстом, а не внизу справа, где
+     стоит «Закрыть»: это не второе действие диалога. */
+  .log {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .log button {
+    align-self: baseline;
+    margin-top: 0;
+    flex: none;
   }
   .modal button {
     align-self: flex-end;

@@ -24,6 +24,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod journal;
+
 use astro_core::calibrate::{fits, tiff};
 use astro_core::integrate::Rejection;
 use astro_core::pipeline::stack::{StackOptions, combine, select};
@@ -36,7 +38,7 @@ use astro_core::session::{
     Partition, RoleRule, ScanOptions, ScanReport, Session, Severity, Suspicion, Tolerances,
 };
 use astro_core::{PluginHost, default_plugin_dirs};
-use tauri::State;
+use tauri::{Manager, State};
 use tauri::ipc::Channel;
 use serde::{Deserialize, Serialize};
 
@@ -350,6 +352,10 @@ fn host() -> Result<PluginHost, String> {
 
 #[tauri::command]
 fn scan_session(roots: Roots) -> Result<SessionDto, String> {
+    journal::pass("reading frames", || read_session(roots))
+}
+
+fn read_session(roots: Roots) -> Result<SessionDto, String> {
     let rules = roots.rules();
     if rules.is_empty() {
         return Err("nothing to scan".to_owned());
@@ -363,7 +369,17 @@ fn scan_session(roots: Roots) -> Result<SessionDto, String> {
 
 #[tauri::command]
 fn cancel(state: State<'_, Running>) {
+    log::info!("stop asked for");
     state.cancel.store(true, Ordering::Relaxed);
+}
+
+/// Where this run's log is being written, so the window can point at it.
+///
+/// A path the user is never told is the same as no log at all.
+#[tauri::command]
+fn log_file(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app.path().app_log_dir().map_err(|error| format!("{error}"))?;
+    Ok(dir.join("astro-stacker.log").display().to_string())
 }
 
 /// Reads the run and measures every light: stars, width, trailing.
@@ -374,6 +390,17 @@ fn cancel(state: State<'_, Running>) {
 /// was stopped.
 #[tauri::command]
 async fn measure_quality(
+    roots: Roots,
+    sigma: f32,
+    max_stars: usize,
+    raw: bool,
+    on: Channel<Progress>,
+    state: State<'_, Running>,
+) -> Result<QualityDto, String> {
+    journal::pass_async("measuring quality", measure(roots, sigma, max_stars, raw, on, state)).await
+}
+
+async fn measure(
     roots: Roots,
     sigma: f32,
     max_stars: usize,
@@ -524,6 +551,33 @@ fn stack_preview(state: State<'_, Running>) -> tauri::ipc::Response {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn stack_run(
+    roots: Roots,
+    sigma: f32,
+    max_stars: usize,
+    raw: bool,
+    sharpness: f64,
+    max_trail: Option<f64>,
+    max_fwhm: Option<f64>,
+    max_shift: Option<f64>,
+    pixfrac: f64,
+    reject: bool,
+    kappa: f32,
+    out: String,
+    on: Channel<Progress>,
+    state: State<'_, Running>,
+) -> Result<StackResultDto, String> {
+    journal::pass_async(
+        "stacking",
+        stack(
+            roots, sigma, max_stars, raw, sharpness, max_trail, max_fwhm, max_shift, pixfrac,
+            reject, kappa, out, on, state,
+        ),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stack(
     roots: Roots,
     sigma: f32,
     max_stars: usize,
@@ -1011,15 +1065,28 @@ fn frame(session: &Session, id: FrameId) -> FrameDto {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    journal::catch_panics();
     tauri::Builder::default()
+        .plugin(journal::plugin())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(Running::default())
+        .setup(|app| {
+            // First lines of every run: what was running, and where the rest of
+            // this file is, so a log sent on for reading identifies itself.
+            log::info!("astro-stacker {} starting", env!("CARGO_PKG_VERSION"));
+            if let Ok(dir) = app.path().app_log_dir() {
+                log::info!("log in {}", dir.display());
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             scan_session,
             measure_quality,
             stack_run,
             stack_preview,
             cancel,
+            log_file,
             app_version,
             formats
         ])

@@ -1,7 +1,7 @@
 [package]
 name = "astro-stacker-desktop"
 description = "Desktop shell for astro-stacker (Tauri 2)"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -26,6 +26,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 astro-core = { path = "../../../crates/astro-core" }
 astro-plugin-abi = { path = "../../../crates/astro-plugin-abi" }
+tauri-plugin-log = "2.9.1"
+tauri-plugin-opener = "2.5.5"
+log = "0.4.34"
 
 # The core catches a panicking plugin rather than letting it take the process
 # down, which needs unwinding.

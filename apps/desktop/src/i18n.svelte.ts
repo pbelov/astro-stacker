@@ -189,6 +189,8 @@ const ru = {
   close: "Закрыть",
   version: "Версия {v}",
   formatsRead: "Читаются: {list}",
+  logKept: "Что происходило, пишется в файл — вместе с предыдущим запуском",
+  showLog: "Показать",
 
   error: "Ошибка",
   hours: "ч",
@@ -376,6 +378,8 @@ const en: Record<Keys, string> = {
   close: "Close",
   version: "Version {v}",
   formatsRead: "Reads: {list}",
+  logKept: "What happened is written to a file, along with the run before it",
+  showLog: "Show",
 
   error: "Error",
   hours: "h",
