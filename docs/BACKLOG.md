@@ -6,7 +6,108 @@ yet; the reasoning that would be expensive to reverse belongs in
 and how the fix would be recognised, so that picking one up later does not mean
 rediscovering why it was written down.
 
-## Quieten the colour grain in the view TIFF, and only there
+## Defects
+
+### Measuring, rescanning and measuring again crashes the window
+
+Reported sequence: choose lights, measure quality, read the frames again, then
+measure quality a second time. Not reproduced yet, and the first step is to
+catch what the crash actually is rather than to guess — a webview reload, a
+panic in the Rust side, or the process going away — because the three point at
+different places.
+
+Two things in the current code are worth suspecting, and both are true
+independently of whether they cause this:
+
+* `Running` holds a single `cancel: Arc<AtomicBool>` shared by every command,
+  and each command stores `false` into it as it starts. Two passes overlapping
+  therefore share one flag: the second un-cancels the first, and Stop hits
+  whichever is listening. `apps/desktop/src-tauri/src/lib.rs`.
+* The window can have a pass running that it no longer knows about, which is
+  the entry below. A second pass started on top of the first is exactly the
+  reported sequence.
+
+Done when the sequence runs clean, and when starting a pass while another is
+running is either refused with a reason or genuinely supported — not left to
+chance.
+
+### Leaving the quality step abandons the measurement
+
+`App.svelte` switches steps with `{#if step === "frames"} … {:else if step ===
+"quality"} <Quality …/>`, so stepping back to the frames destroys the component.
+Its `running` flag, its `Channel` and the promise from `measure_quality` all go
+with it, while the pass itself keeps running in the background with nothing left
+to report to. Coming back shows a fresh, idle step.
+
+A measurement is minutes of work, and the reason to step back is usually to look
+at something the measurement just raised, so losing it is the wrong answer to a
+normal thing to do.
+
+Done when a pass survives leaving and returning to the step, still showing its
+progress, and when a genuine cancel is something the user asks for rather than
+something a click on another tab does silently.
+
+## The window
+
+### The role cards take more room than they earn, and files are the awkward way in
+
+The five cards for lights, darks, flats, biases and dark-flats are each a
+minimum of 132 px tall and sit before everything else, so the part of the window
+that has something to say is pushed down. They should be compact enough that all
+five and the result of a scan fit together.
+
+Picking individual frames should be as ordinary as picking a folder. A second
+button for it exists, but it reads as the exception; a session where the frames
+worth stacking are a hand-picked subset is not an exception.
+
+Done when the five cards together take about half the height they do now, and
+when choosing files is not visibly the lesser of the two ways in.
+
+### The quality step needs a better control, a way to resume, and a time estimate
+
+Three things about the same header:
+
+* The Measure button is plain and out of keeping with the rest of the window.
+* A run stopped part way through is currently only a run thrown away. Stopping
+  at a hundred frames to look, then continuing, is the natural way to use a step
+  that takes minutes — and the pipeline already reports frames done out of
+  total, so the state to resume from exists.
+* Progress is a bar and a frame count with no time on it. The per-frame rate is
+  steady enough after the first handful that a remaining-time estimate is honest
+  rather than a guess, and without one the only way to know whether to wait is
+  to wait.
+
+Done when a stopped run can be continued without re-reading the frames it
+already measured, and when the step says how long it has left.
+
+### Name the result files, not the folder they land in
+
+The window asks for an output directory — `open({ directory: true })` in
+`Stack.svelte` — and the Rust side writes `stack.fits`, `stack.tif` and
+`stack_view.tif` into it. Two runs of the same night with different settings
+therefore overwrite each other, and naming a result means renaming files
+afterwards.
+
+Each output should be named individually, the FITS and the TIFF separately,
+since they are wanted separately: the FITS is the measurement to keep, the TIFF
+is what goes into an editor, and a run often wants one and not the other.
+
+Done when each written file has a path the user chose, when declining to name
+one means it is not written, and when nothing is overwritten without being
+asked.
+
+### A name, a logo and an icon
+
+`astro-stacker` is a working title that describes the category rather than the
+program. The window, the installer and the taskbar all show a default icon.
+
+This is a decision to make rather than a task to execute, and it is written down
+here so it is made deliberately and once, before a name spreads into the crate
+names, the repository, the release artefacts and anything published.
+
+## The result
+
+### Quieten the colour grain in the view TIFF, and only there
 
 Frames are combined by depositing photosites rather than by interpolating them.
 One consequence of that is structural rather than incidental: on a Bayer sensor
