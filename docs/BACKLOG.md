@@ -29,7 +29,24 @@ independently of whether they cause this:
 
 Done when the sequence runs clean, and when starting a pass while another is
 running is either refused with a reason or genuinely supported — not left to
-chance.
+chance. The log below is the tool for finding out, and comes first.
+
+### The window reports a version that is not the one being built
+
+`app_version` returns the desktop crate's own `CARGO_PKG_VERSION`, and
+`tauri.conf.json` carries a third copy. The desktop is deliberately its own
+workspace — Tauri's dependency tree has no business slowing `cargo test` at the
+top of the project — but nothing carries the version across, so both sit at
+whatever they were last edited to while the root moves on. `build.bat` names the
+release folder from the root version, so a folder can say one number while the
+About box inside it says another.
+
+Harmless until something goes wrong, and then it is the first thing that lies:
+a crash report or a log line naming the wrong version sends whoever reads it to
+the wrong code.
+
+Done when one edit moves all three, and when nothing can build with them
+disagreeing.
 
 ### Leaving the quality step abandons the measurement
 
@@ -46,6 +63,55 @@ normal thing to do.
 Done when a pass survives leaving and returning to the step, still showing its
 progress, and when a genuine cancel is something the user asks for rather than
 something a click on another tab does silently.
+
+## Diagnostics
+
+### A log file that outlives the process
+
+Nothing in the window keeps a record: there is no logging in
+`apps/desktop/src-tauri` at all, so a crash leaves only what the user
+remembers. A file, replaced each run, is the right shape — with two conditions,
+because without them such a log is reliably empty exactly when it is needed.
+
+**Keep one generation, do not truncate on start.** The user's next action after
+a crash is to relaunch and go looking for the log, and a log truncated on start
+is wiped by that very launch. Move the current file aside on startup and keep
+the one before it.
+
+**Flush every line.** A buffered writer loses its tail, and the tail is the
+part describing the crash. At the rate a window logs, flushing per line costs
+nothing.
+
+Three kinds of failure need three different capture points, and only the first
+is free:
+
+* A Rust panic. `panic = "unwind"` is already set in the release profile, so a
+  hook installed in `run()` can write the payload and a backtrace before the
+  stack goes.
+* An error in the webview. A JS exception or a rejected promise is invisible to
+  the Rust side unless the frontend forwards it, so `window.onerror` and
+  `unhandledrejection` need to reach the same file.
+* A hard abort — access violation, stack overflow, an allocation that fails. No
+  hook runs at all, and only what was already flushed survives. This is what
+  makes flushing per line the load-bearing part rather than a nicety.
+
+Prefer `tauri-plugin-log`, the official one, over writing this: it already has
+the file target, the webview console and a rotation strategy, and this project
+does not need its own logger. Check what its rotation actually does before
+relying on it — size-based rotation is not the same as one file per run.
+
+Content worth having, judged by whether it would answer the crash above: the
+version, every command as it starts and as it ends with its outcome, how many
+frames each pass was given, and every cancel. That sequence alone would likely
+settle whether two passes were running at once.
+
+The file has to be findable. A path under `%LOCALAPPDATA%` that nobody is told
+about is the same as no log, so the About box should show it and offer to open
+the folder.
+
+Done when a deliberate panic, a deliberate JS error and a kill of the process
+each leave a file that says what was happening, when relaunching to read it does
+not destroy it, and when the user can reach it without being told a path.
 
 ## The window
 
