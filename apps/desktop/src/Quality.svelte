@@ -6,34 +6,8 @@
   // половина ночи. Поэтому цена считается на лету, а таблица сразу помечает,
   // что выпадет.
 
-  import { invoke, Channel } from "@tauri-apps/api/core";
   import { i18n } from "./i18n.svelte";
-
-  type FrameQuality = {
-    name: string;
-    stars: number;
-    fwhm: number;
-    trail: number;
-    angle: number;
-    agreement: number;
-    sky: number;
-    noise: number;
-    saturated: number;
-    oversized: number;
-    seconds: number;
-  };
-  type Quality = {
-    frames: FrameQuality[];
-    failed: { name: string; reason: string }[];
-    seconds: number;
-    stopped: boolean;
-    direction: number;
-    directionAgreement: number;
-    starCap: number;
-  };
-  type Progress =
-    | { stage: "master"; kind: string; done: number; total: number }
-    | { stage: "frame"; done: number; total: number; name: string };
+  import { measurement } from "./measurement.svelte";
 
   let {
     roots,
@@ -51,12 +25,13 @@
     trim: (value: number, decimals?: number) => string;
   } = $props();
 
-  let running = $state(false);
-  let progress = $state<Progress | null>(null);
-  let quality = $state<Quality | null>(null);
-  let error = $state("");
-  /** null = порог не задан, кадры взвешиваются, ничего не выбрасывается. */
-  let limit = $state<number | null>(null);
+  // Прогон живёт в `measurement`, а не здесь: этот компонент уничтожается при
+  // каждом уходе на другой шаг.
+  const running = $derived(measurement.running);
+  const progress = $derived(measurement.progress);
+  /** Результат показывается, только если он про те кадры, что выбраны сейчас. */
+  const quality = $derived(measurement.isOf(roots) ? measurement.result : null);
+  const error = $derived(measurement.error);
 
   const measured = $derived(quality?.frames ?? []);
   const shaped = $derived(measured.filter((f) => Number.isFinite(f.trail)));
@@ -69,7 +44,7 @@
     values.length ? values[Math.floor((values.length - 1) / 2)] : NaN;
 
   const kept = $derived.by(() => {
-    const at = limit;
+    const at = measurement.limit;
     return at === null ? shaped.length : shaped.filter((f) => f.trail <= at).length;
   });
   const capped = $derived(measured.filter((f) => f.stars >= (quality?.starCap ?? Infinity)).length);
@@ -84,34 +59,8 @@
       : [],
   );
 
-  async function measure() {
-    if (running) return;
-    running = true;
-    error = "";
-    quality = null;
-    progress = null;
-    const channel = new Channel<Progress>();
-    channel.onmessage = (message) => (progress = message);
-    try {
-      quality = await invoke<Quality>("measure_quality", {
-        roots,
-        sigma,
-        maxStars,
-        raw,
-        on: channel,
-      });
-      limit = null;
-    } catch (thrown) {
-      error = String(thrown);
-    } finally {
-      running = false;
-      progress = null;
-    }
-  }
-
-  function stop() {
-    void invoke("cancel");
-  }
+  const measure = () => void measurement.start(roots, sigma, maxStars, raw);
+  const stop = () => measurement.stop();
 
   const share = $derived(
     progress === null
@@ -223,15 +172,15 @@
         min={0}
         max={Math.max(1, trails[trails.length - 1])}
         step={0.05}
-        value={limit ?? trails[trails.length - 1]}
-        oninput={(e) => (limit = Number(e.currentTarget.value))}
+        value={measurement.limit ?? trails[trails.length - 1]}
+        oninput={(e) => (measurement.limit = Number(e.currentTarget.value))}
       />
       <div class="readout num">
-        {#if limit === null}
+        {#if measurement.limit === null}
           <strong>{i18n.t("noLimit")}</strong>
           <span class="muted">{i18n.t("weightsDoTheWork")}</span>
         {:else}
-          <strong>{trim(limit, 2)} px</strong>
+          <strong>{trim(measurement.limit, 2)} px</strong>
           <span class="muted">
             {i18n.t("keepsOf", {
               kept,
@@ -241,14 +190,16 @@
           </span>
         {/if}
       </div>
-      {#if limit !== null}
-        <button class="ghost" onclick={() => (limit = null)}>{i18n.t("clearLimit")}</button>
+      {#if measurement.limit !== null}
+        <button class="ghost" onclick={() => (measurement.limit = null)}>
+          {i18n.t("clearLimit")}
+        </button>
       {/if}
     </div>
     <ul class="marks num">
       {#each marks as mark (mark.share)}
         <li>
-          <button class="link" onclick={() => (limit = mark.value)}>
+          <button class="link" onclick={() => (measurement.limit = mark.value)}>
             {i18n.t("markKeeps", {
               percent: Math.round(mark.share * 100),
               value: trim(mark.value, 2),
@@ -277,7 +228,7 @@
         </thead>
         <tbody>
           {#each ranked as frame (frame.name)}
-            <tr class:dropped={limit !== null && frame.trail > limit}>
+            <tr class:dropped={measurement.limit !== null && frame.trail > measurement.limit}>
               <td class="name">{frame.name}</td>
               <td><strong>{number(frame.trail)}</strong></td>
               <td>{number(frame.fwhm)}</td>
