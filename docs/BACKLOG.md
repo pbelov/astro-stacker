@@ -115,6 +115,30 @@ not destroy it, and when the user can reach it without being told a path.
 
 ## The window
 
+### Rework the layout: controls on the left, results on the right, nothing scrolling
+
+The window is one column of stacked cards, so controls and results are mixed
+down the page and everything is reached by scrolling. It should be two panes:
+every button, setting and control on the left, and the right showing only what
+came out.
+
+Steps stay as they are — frames, quality, stacking — unless two of them turn out
+to belong together once the controls are gathered on one side; that is a
+question to answer while doing it, not before.
+
+The no-scrolling requirement needs stating precisely, because taken literally it
+cannot be met: a per-frame table of three hundred frames does not fit on a
+screen. Read as: **the window itself never scrolls in either direction.**
+Anything longer than its pane scrolls inside that pane, which a fixed two-pane
+layout gives for free, and which is why the cards' ad-hoc `max-height` limits —
+`.scroll` in `Quality.svelte`, `.paths` in `DropZone.svelte` — go away rather
+than multiply. If that reading is wrong, it is the thing to correct before any
+of this is built.
+
+Done when the window has no scrollbar of its own at any size it can be opened
+at, when every control is on the left and nothing on the right is a control, and
+when narrowing the window rearranges rather than clips.
+
 ### The role cards take more room than they earn, and files are the awkward way in
 
 The five cards for lights, darks, flats, biases and dark-flats are each a
@@ -129,22 +153,43 @@ worth stacking are a hand-picked subset is not an exception.
 Done when the five cards together take about half the height they do now, and
 when choosing files is not visibly the lesser of the two ways in.
 
-### The quality step needs a better control, a way to resume, and a time estimate
+### The quality step needs a better control and a way to resume
 
-Three things about the same header:
+Two things about the same header:
 
 * The Measure button is plain and out of keeping with the rest of the window.
 * A run stopped part way through is currently only a run thrown away. Stopping
   at a hundred frames to look, then continuing, is the natural way to use a step
   that takes minutes — and the pipeline already reports frames done out of
   total, so the state to resume from exists.
-* Progress is a bar and a frame count with no time on it. The per-frame rate is
-  steady enough after the first handful that a remaining-time estimate is honest
-  rather than a guess, and without one the only way to know whether to wait is
-  to wait.
 
 Done when a stopped run can be continued without re-reading the frames it
-already measured, and when the step says how long it has left.
+already measured.
+
+### An honest remaining time on both long steps, and no talking around it
+
+Neither the quality step nor the stacking step says how long it has left. Both
+show a bar and a frame count, and under it a sentence explaining that this takes
+minutes — `measureSlow` and `stackSlow` in `i18n.svelte.ts`. Those sentences
+exist only because there is no number; a number replaces them, and they should
+go with it rather than sit beside it.
+
+Quality is the easy half: one stage, a steady per-frame rate after the first
+handful, so time remaining follows from frames remaining.
+
+Stacking is the real problem, and doing it the easy way would produce a
+confident wrong answer. The run is five stages of quite different cost — masters,
+measuring every light, aligning, depositing in one pass or two, writing — and
+the progress bar restarts within each. A remaining time has to be over the whole
+run, which means weighting the stages by what they actually cost rather than by
+their frame counts. Measuring and depositing are both dominated by decoding and
+are the two that matter; aligning and writing are rounding error next to them;
+rejection adds a second deposit pass, which the run already knows about because
+it reports the pass number.
+
+Done when both steps show a time that is stable rather than jumping about as a
+stage changes, when a run with rejection is not estimated as though it had one
+pass, and when the explanatory sentences are gone.
 
 ### Name the result files, not the folder they land in
 
