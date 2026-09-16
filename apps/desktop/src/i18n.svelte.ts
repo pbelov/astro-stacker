@@ -134,8 +134,13 @@ const ru = {
   limitFwhm: "Порог по ширине, px",
   limitShift: "Порог по сдвигу, px",
   limitsHint: "Пусто — порога нет, кадры идут с весом по качеству. Порог по сдвигу отсекает кадры фазы наведения: каждый оставленный расширяет холст под себя.",
-  outFolder: "Куда положить",
-  outNotSet: "папка не выбрана",
+  outFiles: "Куда сохранить",
+  outFits: "FITS, измерение",
+  outTiff: "TIFF, линейный",
+  outView: "TIFF, для просмотра",
+  outNotSet: "не сохранять",
+  outNothingNamed: "Назови хотя бы один файл, иначе складывать не во что",
+  choose: "Выбрать…",
 
   aligning: "Совмещаю кадры…",
   stackingFrame: "Складываю {done} из {total} — {name}",
@@ -198,7 +203,8 @@ const ru = {
   days: "дн",
 } as const;
 
-type Keys = keyof typeof ru;
+/** Имя строки. Экспортируется, чтобы список ключей проверялся, а не приводился. */
+export type Keys = keyof typeof ru;
 
 const en: Record<Keys, string> = {
   appName: "AstroStacker",
@@ -321,8 +327,13 @@ const en: Record<Keys, string> = {
   limitFwhm: "Width limit, px",
   limitShift: "Shift limit, px",
   limitsHint: "Empty means no limit: frames contribute by weight. The shift limit is what removes the framing shots — every one kept widens the canvas to cover it.",
-  outFolder: "Write to",
-  outNotSet: "no folder chosen",
+  outFiles: "Where to save",
+  outFits: "FITS, the measurement",
+  outTiff: "TIFF, linear",
+  outView: "TIFF, to look at",
+  outNotSet: "not saved",
+  outNothingNamed: "Name at least one file, or there is nowhere for the result to go",
+  choose: "Choose…",
 
   aligning: "Aligning the frames…",
   stackingFrame: "Stacking {done} of {total} — {name}",

@@ -8,7 +8,7 @@
   import DropZone from "./ui/DropZone.svelte";
   import Quality from "./Quality.svelte";
   import Stack from "./Stack.svelte";
-  import { i18n, LOCALES, type Locale } from "./i18n.svelte";
+  import { i18n, LOCALES, type Keys, type Locale } from "./i18n.svelte";
 
   type Step = "frames" | "quality" | "stack";
   const STEPS: { id: Step; key: "stepFrames" | "stepQuality" | "stepStack"; ready: boolean }[] = [
@@ -18,7 +18,7 @@
   ];
 
   type Role = "lights" | "darks" | "flats" | "biases" | "darkFlats";
-  const ROLES: { id: Role; label: string }[] = [
+  const ROLES: { id: Role; label: Keys }[] = [
     { id: "lights", label: "roleLights" },
     { id: "darks", label: "roleDarks" },
     { id: "flats", label: "roleFlats" },
@@ -368,7 +368,7 @@
         {#each ROLES as role (role.id)}
           <div bind:this={zones[role.id]}>
             <DropZone
-              label={i18n.t(role.label as never)}
+              label={i18n.t(role.label)}
               hint={i18n.t("dropHere")}
               bind:paths={roots[role.id]}
               hot={hot === role.id}

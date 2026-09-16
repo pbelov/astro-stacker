@@ -7,8 +7,8 @@
   // сработало.
 
   import { invoke, Channel } from "@tauri-apps/api/core";
-  import { open } from "@tauri-apps/plugin-dialog";
-  import { i18n } from "./i18n.svelte";
+  import { save } from "@tauri-apps/plugin-dialog";
+  import { i18n, type Keys } from "./i18n.svelte";
 
   type Coverage = { filled: number; medianDepth: number; thinnest: number };
   type StackedFrame = {
@@ -65,7 +65,15 @@
   let pixfrac = $state(1);
   let reject = $state(false);
   let kappa = $state(3);
-  let out = $state("");
+  // Три результата, каждый со своим именем. Раньше спрашивалась папка, а имена
+  // внутри были жёсткие, и второй прогон той же ночи молча затирал первый.
+  type Output = "fits" | "tiff" | "view";
+  const OUTPUTS: { id: Output; label: Keys; suffix: string; ext: string }[] = [
+    { id: "fits", label: "outFits", suffix: ".fits", ext: "fits" },
+    { id: "tiff", label: "outTiff", suffix: ".tif", ext: "tif" },
+    { id: "view", label: "outView", suffix: "-view.tif", ext: "tif" },
+  ];
+  let out = $state<Record<Output, string>>({ fits: "", tiff: "", view: "" });
 
   let running = $state(false);
   let progress = $state<Progress | null>(null);
@@ -73,11 +81,75 @@
   let error = $state("");
   let canvas = $state<HTMLCanvasElement | null>(null);
 
-  const ready = $derived(out.length > 0 && !running);
+  const ready = $derived(OUTPUTS.some((o) => out[o.id].length > 0) && !running);
 
-  async function chooseOut() {
-    const picked = await open({ directory: true, multiple: false });
-    if (typeof picked === "string") out = picked;
+  /**
+   * Путь, укороченный с начала: имя файла важнее того, где он лежит.
+   *
+   * Обрезка здесь, а не `direction: rtl` в стилях: тот приём переставляет
+   * слэши и двоеточие как слабые символы, и `D:/main/x.fits` показывается
+   * не тем путём, который выбран. Целиком он всё равно виден по наведению.
+   */
+  const short = (path: string, keep = 46) =>
+    path.length <= keep ? path : "…" + path.slice(path.length - keep + 1);
+
+  /** Путь без последнего сегмента. Разделитель тут может быть любой из двух. */
+  const folderOf = (path: string) => {
+    const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    return at > 0 ? path.slice(0, at) : "";
+  };
+
+  /** Папка, в которой разумно открыть диалог: где уже что-то выбрано, иначе где лайты. */
+  const startingFolder = $derived.by(() => {
+    const already = OUTPUTS.map((o) => out[o.id]).find((p) => p.length > 0);
+    if (already) return folderOf(already);
+    const light = roots.lights?.[0];
+    if (!light) return "";
+    // Лайты теперь могут быть и отдельными файлами: точка в последнем сегменте
+    // означает имя файла, а не папку.
+    const tail = light.split(/[\\/]/).pop() ?? "";
+    return tail.includes(".") ? folderOf(light) : light;
+  });
+
+  async function choose(kind: Output) {
+    const spec = OUTPUTS.find((o) => o.id === kind)!;
+    const folder = startingFolder;
+    const stem = stemOf() ?? "stack";
+    const picked = await save({
+      title: i18n.t(spec.label),
+      defaultPath: folder ? `${folder}/${stem}${spec.suffix}` : `${stem}${spec.suffix}`,
+      filters: [{ name: spec.ext.toUpperCase(), extensions: [spec.ext] }],
+    });
+    if (typeof picked !== "string") return;
+    out[kind] = picked;
+    propose(picked);
+  }
+
+  /** Общее имя, если оно уже выбрано: второй диалог не должен начинаться с нуля. */
+  function stemOf(): string | null {
+    for (const o of OUTPUTS) {
+      const path = out[o.id];
+      if (!path) continue;
+      const name = path.split(/[\\/]/).pop() ?? "";
+      return name.replace(/\.[^.]*$/, "").replace(/-view$/, "");
+    }
+    return null;
+  }
+
+  /**
+   * Выбрал одно — остальные предложены рядом.
+   *
+   * Три диалога вместо одного выбора папки — это больше кликов, а не меньше,
+   * если каждый надо пройти. Поэтому первый выбор задаёт папку и имя для
+   * остальных; любое из них потом меняется своим диалогом или убирается.
+   */
+  function propose(picked: string) {
+    const folder = folderOf(picked);
+    const name = (picked.split(/[\\/]/).pop() ?? "").replace(/\.[^.]*$/, "").replace(/-view$/, "");
+    for (const o of OUTPUTS) {
+      if (out[o.id]) continue;
+      out[o.id] = folder ? `${folder}/${name}${o.suffix}` : `${name}${o.suffix}`;
+    }
   }
 
   async function run() {
@@ -101,7 +173,8 @@
         pixfrac,
         reject,
         kappa,
-        out,
+        // Незаполненное — это «не сохранять», а не пустая строка.
+        out: Object.fromEntries(OUTPUTS.map((o) => [o.id, out[o.id] || null])),
         on: channel,
       });
       result = produced;
@@ -229,10 +302,26 @@
   </div>
   <p class="dim">{i18n.t("rejectHint")}</p>
 
-  <div class="row out">
-    <label for="out">{i18n.t("outFolder")}</label>
-    <span class="path num" class:muted={!out}>{out || i18n.t("outNotSet")}</span>
-    <button class="ghost" onclick={chooseOut}>{i18n.t("browse")}</button>
+  <div class="outputs">
+    <h3>{i18n.t("outFiles")}</h3>
+    {#each OUTPUTS as spec (spec.id)}
+      <div class="row out">
+        <span class="what">{i18n.t(spec.label)}</span>
+        <span class="path num" class:muted={!out[spec.id]} title={out[spec.id]}>
+          {out[spec.id] ? short(out[spec.id]) : i18n.t("outNotSet")}
+        </span>
+        <button class="ghost" onclick={() => choose(spec.id)}>{i18n.t("choose")}</button>
+        <button
+          class="ghost drop"
+          disabled={!out[spec.id]}
+          title={i18n.t("clear")}
+          onclick={() => (out[spec.id] = "")}>×</button
+        >
+      </div>
+    {/each}
+    {#if !OUTPUTS.some((o) => out[o.id])}
+      <p class="dim">{i18n.t("outNothingNamed")}</p>
+    {/if}
   </div>
 </section>
 
@@ -470,10 +559,26 @@
     margin-top: 12px;
   }
 
-  .out {
+  .outputs {
     margin-top: 14px;
     padding-top: 12px;
     border-top: 1px solid var(--line);
+  }
+  .outputs h3 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    color: var(--dim);
+    font-weight: 600;
+  }
+  .out {
+    gap: 10px;
+  }
+  /* Три строки одной формы, так что подписи выровнены по колонке: иначе пути
+     начинаются в разных местах и читаются как разные вещи. */
+  .what {
+    width: 12em;
+    flex: none;
+    font-size: 13px;
   }
   .path {
     flex: 1;
@@ -481,6 +586,16 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 12px;
+  }
+  .drop {
+    width: 2em;
+    flex: none;
+    line-height: 1;
+  }
+  .drop:disabled {
+    opacity: 0.3;
+    cursor: default;
+    border-color: transparent;
   }
 
   .track {

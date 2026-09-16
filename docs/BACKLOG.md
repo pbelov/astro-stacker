@@ -110,22 +110,6 @@ Done when both steps show a time that is stable rather than jumping about as a
 stage changes, when a run with rejection is not estimated as though it had one
 pass, and when the explanatory sentences are gone.
 
-### Name the result files, not the folder they land in
-
-The window asks for an output directory — `open({ directory: true })` in
-`Stack.svelte` — and the Rust side writes `stack.fits`, `stack.tif` and
-`stack_view.tif` into it. Two runs of the same night with different settings
-therefore overwrite each other, and naming a result means renaming files
-afterwards.
-
-Each output should be named individually, the FITS and the TIFF separately,
-since they are wanted separately: the FITS is the measurement to keep, the TIFF
-is what goes into an editor, and a run often wants one and not the other.
-
-Done when each written file has a path the user chose, when declining to name
-one means it is not written, and when nothing is overwritten without being
-asked.
-
 ### A name, a logo and an icon
 
 `astro-stacker` is a working title that describes the category rather than the
@@ -154,16 +138,16 @@ where the eye lands first, and a first stretch exaggerates chroma grain before
 it brings up anything worth seeing, so the deposited stack reads as the noisier
 one to whoever is judging it.
 
-The fix belongs to presentation, not to the stack. `stack.fits` and `stack.tif`
-are the measurement and must not move. `stack_view.tif` already exists to be
-looked at, and is the place for a mild smoothing of the colour-difference
-channels alone, leaving luminance untouched — which is what removes the grain
-without costing any resolution.
+The fix belongs to presentation, not to the stack. The FITS and the linear TIFF
+are the measurement and must not move. The stretched TIFF is written to be
+looked at and nothing else, so it is the place for a mild smoothing of the
+colour-difference channels alone, leaving luminance untouched — which is what
+removes the grain without costing any resolution.
 
 Done when:
 
-* the view TIFF's red-minus-green and blue-minus-green scatter at pixel scale is
-  brought down to about what an interpolating stacker produces,
-* star FWHM measured on the view TIFF is unchanged from the linear TIFF, and
-* `stack.fits` and `stack.tif` come out bit-identical to what the same run
+* the stretched TIFF's red-minus-green and blue-minus-green scatter at pixel
+  scale is brought down to about what an interpolating stacker produces,
+* star FWHM measured on the stretched TIFF is unchanged from the linear one, and
+* the FITS and the linear TIFF come out bit-identical to what the same run
   produced before the change.

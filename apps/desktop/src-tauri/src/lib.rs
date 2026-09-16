@@ -58,6 +58,27 @@ pub struct Roots {
     pub dark_flats: Vec<String>,
 }
 
+/// Where each result is to be written. A target left unnamed is not produced.
+///
+/// Three paths rather than one folder: the two TIFFs and the FITS are wanted
+/// separately and at different times — the FITS is the measurement to keep, the
+/// linear TIFF is what goes into an editor, the stretched one is only to look
+/// at — and a folder with fixed names inside it means a second run of the same
+/// night silently replaces the first.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Outputs {
+    pub fits: Option<String>,
+    pub tiff: Option<String>,
+    pub view: Option<String>,
+}
+
+impl Outputs {
+    fn none_named(&self) -> bool {
+        self.fits.is_none() && self.tiff.is_none() && self.view.is_none()
+    }
+}
+
 impl Roots {
     fn rules(&self) -> Vec<RoleRule> {
         let mut rules = Vec::new();
@@ -562,7 +583,7 @@ async fn stack_run(
     pixfrac: f64,
     reject: bool,
     kappa: f32,
-    out: String,
+    out: Outputs,
     on: Channel<Progress>,
     state: State<'_, Running>,
 ) -> Result<StackResultDto, String> {
@@ -589,13 +610,19 @@ async fn stack(
     pixfrac: f64,
     reject: bool,
     kappa: f32,
-    out: String,
+    out: Outputs,
     on: Channel<Progress>,
     state: State<'_, Running>,
 ) -> Result<StackResultDto, String> {
     let rules = roots.rules();
     if rules.is_empty() {
         return Err("nothing to stack".to_owned());
+    }
+    // Refused here rather than after the run: a stack of a few hundred frames
+    // is minutes of work, and finding out at the end that it was written
+    // nowhere is the worst moment to be told.
+    if out.none_named() {
+        return Err("no result file was named".to_owned());
     }
     let cancel = state.cancel.clone();
     cancel.store(false, Ordering::Relaxed);
@@ -691,11 +718,12 @@ async fn stack(
     let first = selection.frames.first().ok_or("nothing was stacked")?;
     let mosaic = Mosaic::new(&first.read.layout).ok_or("the frames are not a mosaic")?;
 
-    let written = write(&stacked, &selection, &mosaic, &out).map_err(|e| format!("{e:#}"))?;
+    let levelled = view::for_viewing(&stacked, &first.read.layout, &mosaic, true);
+    let written =
+        write(&stacked, &selection, &mosaic, &levelled, &out).map_err(|e| format!("{e:#}"))?;
 
     // The preview is rendered from the levelled copy, the same one the stretched
     // TIFF beside it comes from, so the window and the file agree.
-    let levelled = view::for_viewing(&stacked, &first.read.layout, &mosaic, true);
     let rendered = view::preview(&levelled, &stacked, 1400, 200.0);
     if let Ok(mut slot) = state.preview.lock() {
         *slot = rendered.rgba;
@@ -757,15 +785,18 @@ async fn stack(
     })
 }
 
-/// Writes the FITS and both TIFFs, exactly as the command line does.
+/// Writes whichever results were named, in the same form the command line does.
+///
+/// `levelled` is passed in rather than built here because the preview needs the
+/// same copy, and building it twice is a second pass over every pixel of the
+/// stack for a result that is identical to the first.
 fn write(
     stacked: &astro_core::pipeline::stack::Stacked,
     selection: &astro_core::pipeline::stack::Selection<'_>,
     mosaic: &Mosaic,
-    out: &str,
+    levelled: &view::Viewable,
+    out: &Outputs,
 ) -> std::io::Result<Vec<String>> {
-    let dir = PathBuf::from(out);
-    std::fs::create_dir_all(&dir)?;
     let first = &selection.frames[0];
     let (width, height) = (stacked.canvas.width, stacked.canvas.height);
 
@@ -782,34 +813,54 @@ fn write(
     let borrowed: Vec<&[f32]> = stacked.planes.iter().map(|p| p.as_slice()).collect();
     let mut written = Vec::new();
 
-    let target = dir.join("stack.fits");
-    fits::write_planes(&target, &borrowed, width, height, &header)?;
-    written.push(target.display().to_string());
+    if let Some(target) = &out.fits {
+        let target = at(target)?;
+        fits::write_planes(&target, &borrowed, width, height, &header)?;
+        written.push(target.display().to_string());
+    }
 
-    let linear = view::for_viewing(stacked, &first.read.layout, mosaic, false);
-    let planes: Vec<&[f32]> = linear.planes.iter().map(|p| p.as_slice()).collect();
-    let target = dir.join("stack.tif");
-    tiff::write(
-        &target,
-        &tiff::Image { width, height, planes: &planes[..mosaic.colours.min(3)] },
-        &tiff::Mapping::Linear { full: linear.full },
-        &linear.note,
-    )?;
-    written.push(target.display().to_string());
+    // Built only if asked for: it is another pass over every pixel, and a run
+    // that wants the FITS alone should not pay for it.
+    if let Some(target) = &out.tiff {
+        let target = at(target)?;
+        let linear = view::for_viewing(stacked, &first.read.layout, mosaic, false);
+        let planes: Vec<&[f32]> = linear.planes.iter().map(|p| p.as_slice()).collect();
+        tiff::write(
+            &target,
+            &tiff::Image { width, height, planes: &planes[..mosaic.colours.min(3)] },
+            &tiff::Mapping::Linear { full: linear.full },
+            &linear.note,
+        )?;
+        written.push(target.display().to_string());
+    }
 
-    let levelled = view::for_viewing(stacked, &first.read.layout, mosaic, true);
-    let planes: Vec<&[f32]> = levelled.planes.iter().map(|p| p.as_slice()).collect();
-    let floor = view::percentile(&levelled.planes[mosaic.dominant], 0.02).min(levelled.common);
-    let target = dir.join("stack_view.tif");
-    tiff::write(
-        &target,
-        &tiff::Image { width, height, planes: &planes[..mosaic.colours.min(3)] },
-        &tiff::Mapping::Asinh { black: floor, white: levelled.full, softening: 200.0 },
-        &levelled.note,
-    )?;
-    written.push(target.display().to_string());
+    if let Some(target) = &out.view {
+        let target = at(target)?;
+        let planes: Vec<&[f32]> = levelled.planes.iter().map(|p| p.as_slice()).collect();
+        let floor = view::percentile(&levelled.planes[mosaic.dominant], 0.02).min(levelled.common);
+        tiff::write(
+            &target,
+            &tiff::Image { width, height, planes: &planes[..mosaic.colours.min(3)] },
+            &tiff::Mapping::Asinh { black: floor, white: levelled.full, softening: 200.0 },
+            &levelled.note,
+        )?;
+        written.push(target.display().to_string());
+    }
 
     Ok(written)
+}
+
+/// A named file, with the folder above it made if it is not there.
+///
+/// The path comes from a save dialog, so the folder almost always exists; the
+/// exception is one typed by hand into that dialog, and failing at the end of a
+/// run over a missing folder would throw the whole run away.
+fn at(path: &str) -> std::io::Result<PathBuf> {
+    let path = PathBuf::from(path);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(path)
 }
 
 #[tauri::command]
@@ -1235,7 +1286,10 @@ mod tests {
     }
 
     #[test]
-    fn a_stack_comes_out_the_size_of_its_canvas_and_its_preview_matches() {
+    fn a_stack_writes_what_was_named_and_previews_at_the_size_it_reports() {
+        // Two things about what comes out of a stack, sharing one because the
+        // run that produces them takes a minute of real frames.
+        //
         // The preview travels as loose bytes with its size in a separate field,
         // so nothing checks the two agree except this. A mismatch draws
         // diagonal garbage into the canvas, which looks like a decoding bug
@@ -1317,6 +1371,40 @@ mod tests {
             "the preview is nearly all black: {bright} lit of {}",
             rendered.width * rendered.height
         );
+
+        // A result the user did not ask for must not appear beside the one they
+        // did. Writing all three regardless is what the fixed names in a chosen
+        // folder used to do, and it is what made two runs of a night collide.
+        let dir = std::env::temp_dir().join(format!("astro-stacker-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let named = |name: &str| dir.join(name).display().to_string();
+
+        let only_fits =
+            Outputs { fits: Some(named("one.fits")), tiff: None, view: None };
+        let written = write(&stacked, &selection, &mosaic, &levelled, &only_fits)
+            .expect("the FITS is written");
+        assert_eq!(written.len(), 1, "one named, one written: {written:?}");
+        assert!(dir.join("one.fits").is_file());
+        let beside: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the folder is there")
+            .map(|entry| entry.expect("an entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(beside, vec!["one.fits"], "nothing unasked-for beside it");
+
+        // And each name is used as given, rather than as a folder to put a
+        // fixed name into.
+        let all = Outputs {
+            fits: Some(named("two.fits")),
+            tiff: Some(named("two.tif")),
+            view: Some(named("two-view.tif")),
+        };
+        let written = write(&stacked, &selection, &mosaic, &levelled, &all)
+            .expect("all three are written");
+        assert_eq!(written.len(), 3);
+        for name in ["two.fits", "two.tif", "two-view.tif"] {
+            assert!(dir.join(name).is_file(), "{name} was named and is not there");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
