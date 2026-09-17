@@ -85,6 +85,56 @@ Two things about the same header:
 Done when a stopped run can be continued without re-reading the frames it
 already measured.
 
+### Name the frames that are not lights, and offer to refile them
+
+A dark or a flat filed among the lights survives the whole run today. The
+measuring step finds no stars in it, so it lands under "no shape" with a count
+of zero beside it, which says what failed and not what the frame is; the frame
+then fails to register and is dropped without anyone learning why it was there.
+
+The numbers that would name it are already measured. Every light is decoded,
+calibrated and searched at this step, and what comes back per frame is the star
+count, the sky level and its noise, the saturated and oversized counts and the
+shape — `Detection` in `stars/mod.rs`, carried per frame on `Measured`. A dark
+sits at the calibration floor with no stars; a flat sits high and smooth with no
+stars; a light of a clouded sky sits high with no stars but is not smooth. So
+this costs no extra decoding, which is the whole reason it belongs at this step
+rather than at the scan: the scan would have to read five hundred frames to
+learn what this pass has already read.
+
+It may only propose. ARCHITECTURE.md settles that evidence never elects a
+frame's kind, and the reasoning there is worth re-reading before starting: it
+argues a dark has only a negative signature, no sky and no stars, indistinguishable
+from a light under thick cloud. That argument is about metadata — exposure, ISO
+and body are identical for a dark and its lights by construction. Pixels do
+separate them, which is what makes this worth doing and also what it must not be
+allowed to overreach into: the residual pairs that pixels still cannot split are
+a dark against a light of an empty field, and a flat against a light of the
+twilight sky.
+
+**What "refile" means has to be settled first**, because the two readings are
+very different amounts of work and risk:
+
+* reassigning the frame's role inside the session, so it is used as a dark in
+  this run and nothing on disk moves, or
+* moving the file into the darks folder.
+
+The first is the one to build unless the owner says otherwise. Roles are carried
+by `RoleRule`, which is per path rather than per frame, so how a single frame
+takes a different role than the folder it sits in is the open design question —
+the window can now be given individual files, which is most of the way there.
+
+The reverse direction is the damaging one and is not covered by this entry: a
+light among the darks poisons the master and subtracts a star field from every
+frame in the stack, silently. It is not visible at this step because this step
+measures lights, though it does build the masters first. Worth deciding whether
+it belongs here too.
+
+Done when a dark and a flat placed among the lights are each named as what they
+are rather than as a frame with no stars, when nothing is reassigned without
+being asked, and when a frame the tool is unsure about is reported as unsure
+rather than guessed at.
+
 ### An honest remaining time on both long steps, and no talking around it
 
 Neither the quality step nor the stacking step says how long it has left. Both
