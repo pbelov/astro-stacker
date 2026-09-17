@@ -19,7 +19,7 @@
 //!   sit at roughly twice the level, so a whole-frame median lands between the
 //!   two populations and describes neither.
 
-use astro_plugin_abi::abi::{CFA_MAX_CELLS, ImageLayout};
+use crate::frame::{CFA_MAX_CELLS, ImageLayout};
 
 use crate::frame::Samples;
 
@@ -429,7 +429,7 @@ fn uniformity(blocks: &[u32], black: f32) -> Uniformity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use astro_plugin_abi::abi::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
+    use crate::frame::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
 
     /// A 2x2 RGGB frame builder: every red photosite gets `r`, every green `g`,
     /// every blue `b`.

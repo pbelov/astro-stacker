@@ -21,7 +21,7 @@
 
 use std::path::{Component, Path};
 
-use astro_plugin_abi::safe::FrameInfo;
+use crate::frame::FrameInfo;
 
 /// The role a frame plays in calibration.
 ///

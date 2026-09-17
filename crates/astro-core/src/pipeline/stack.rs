@@ -11,7 +11,7 @@
 use std::sync::mpsc;
 use std::time::Instant;
 
-use astro_plugin_abi::abi::ImageLayout;
+use crate::frame::ImageLayout;
 
 use crate::calibrate::apply_into;
 use crate::error::{Error, Result};
@@ -19,7 +19,7 @@ use crate::integrate::{Background, Canvas, Contribution, DEFAULT_PIXFRAC, Guide,
 use crate::register::{Registration, Transform, matches};
 use crate::session::mosaic::Mosaic;
 use crate::stars::Star;
-use crate::{PluginHost, Samples};
+use crate::{Formats, Samples};
 
 use super::align::Alignment;
 use super::{Flow, MasterSet, Measured, Step};
@@ -277,7 +277,7 @@ pub struct Stacked {
 /// fraction of that. Rejection costs one more decode again, which is why it is
 /// asked for rather than assumed.
 pub fn combine(
-    host: &PluginHost,
+    host: &Formats,
     selection: &Selection<'_>,
     masters: &MasterSet,
     options: &StackOptions,
@@ -293,7 +293,7 @@ pub fn combine(
 /// threads produces the same bits as one stacked from frames arriving on none.
 #[allow(clippy::too_many_arguments)]
 pub fn combine_with_look_ahead(
-    host: &PluginHost,
+    host: &Formats,
     selection: &Selection<'_>,
     masters: &MasterSet,
     options: &StackOptions,
@@ -471,7 +471,7 @@ struct Ready {
 /// handle that the ABI says belongs to one thread never leaves the thread that
 /// made it.
 fn prepare(
-    host: &PluginHost,
+    host: &Formats,
     frame: &Chosen<'_>,
     masters: &MasterSet,
     plane: &mut Vec<f32>,
@@ -507,7 +507,7 @@ fn look_ahead_lanes(usable: &[&Chosen<'_>], budget_bytes: u64) -> usize {
 
 #[allow(clippy::too_many_arguments)]
 fn deposit(
-    host: &PluginHost,
+    host: &Formats,
     usable: &[&Chosen<'_>],
     masters: &MasterSet,
     options: &StackOptions,

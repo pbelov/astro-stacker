@@ -13,7 +13,7 @@
 //! stars and dilute the trail they are supposed to reveal.
 
 use anyhow::Result;
-use astro_core::PluginHost;
+use astro_core::Formats;
 use clap::{ArgMatches, Args};
 
 use crate::format;
@@ -37,7 +37,7 @@ pub struct StarsArgs {
     pub worst: usize,
 }
 
-pub fn run(host: &PluginHost, args: &StarsArgs, matches: &ArgMatches) -> Result<()> {
+pub fn run(host: &Formats, args: &StarsArgs, matches: &ArgMatches) -> Result<()> {
     let survey = crate::survey::read(host, &args.scan, matches, &args.survey)?;
     if args.each {
         for frame in &survey.frames {

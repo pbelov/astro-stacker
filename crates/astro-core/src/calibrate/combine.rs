@@ -22,12 +22,12 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use astro_plugin_abi::abi::ImageLayout;
+use crate::frame::ImageLayout;
 use rayon::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::frame::Samples;
-use crate::plugin::PluginHost;
+use crate::format::Formats;
 use crate::session::{FrameId, GeometryKey, Session, compat};
 
 /// At or above this many frames, reject outliers against a per-pixel sigma;
@@ -148,7 +148,7 @@ impl Default for CombineOptions {
 /// decode with the count so far and the total, which for the streaming path
 /// counts each frame once per pass.
 pub fn combine(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     frames: &[FrameId],
     options: &CombineOptions,
@@ -170,11 +170,10 @@ pub fn combine(
     for &id in frames {
         let found = GeometryKey::from_layout(&session[id].layout);
         if let Err(reason) = compat::compatible(&expected, &found) {
-            return Err(Error::PluginCall {
-                plugin: session.plugin(session[id].source.plugin).to_owned(),
+            return Err(Error::Decode {
+                format: session.plugin(session[id].source.plugin).to_owned(),
                 action: "combine",
                 path: session.path(id).unwrap_or_default(),
-                status: astro_plugin_abi::abi::Status::INVALID_ARGUMENT,
                 message: reason.to_string(),
             });
         }
@@ -283,7 +282,7 @@ struct Shape<'a> {
 
 /// Every frame held at once, so the answer is exact and each is read once.
 fn combine_resident(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     frames: &[FrameId],
     shape: &Shape<'_>,
@@ -378,7 +377,7 @@ fn combine_resident(
 /// so the streaming path always clips, and is only reached when there are
 /// enough frames for a sigma to mean something.
 fn combine_streaming(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     frames: &[FrameId],
     shape: &Shape<'_>,
@@ -459,23 +458,21 @@ fn combine_streaming(
     })
 }
 
-fn decode(host: &PluginHost, session: &Session, id: FrameId, pixels: usize) -> Result<Vec<u16>> {
+fn decode(host: &Formats, session: &Session, id: FrameId, pixels: usize) -> Result<Vec<u16>> {
     let path = session.path(id).ok_or(Error::NothingToCombine)?;
     let frame = host.open(&path)?;
     match frame.decode()? {
         Samples::U16(values) if values.len() == pixels => Ok(values),
-        Samples::U16(values) => Err(Error::PluginCall {
-            plugin: frame.plugin().id().to_owned(),
+        Samples::U16(values) => Err(Error::Decode {
+            format: frame.format().description().id.clone(),
             action: "combine",
             path,
-            status: astro_plugin_abi::abi::Status::INTERNAL,
             message: format!("decoded {} samples, expected {pixels}", values.len()),
         }),
-        Samples::F32(_) => Err(Error::PluginCall {
-            plugin: frame.plugin().id().to_owned(),
+        Samples::F32(_) => Err(Error::Decode {
+            format: frame.format().description().id.clone(),
             action: "combine",
             path,
-            status: astro_plugin_abi::abi::Status::UNSUPPORTED,
             message: "floating-point sensor data is not combined yet".to_owned(),
         }),
     }

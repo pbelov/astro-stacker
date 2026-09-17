@@ -15,10 +15,9 @@
 //! mismatch means — all of that already has a home, and a second copy of it
 //! behind a window would be the copy that drifts.
 
-// Only the development plugin search and the tests reach for `Path`, and
-// both are gone from a release build, which is what leaves the import unused
-// there.
-#[cfg(any(debug_assertions, test))]
+// Only the tests reach for `Path`, and they are gone from a release build,
+// which is what leaves the import unused there.
+#[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,7 +36,7 @@ use astro_core::session::{
     CalibrationMatch, FrameId, FrameKind, FrameRole, Incompatibility, MatchQuality, Mismatch,
     Partition, RoleRule, ScanOptions, ScanReport, Session, Severity, Suspicion, Tolerances,
 };
-use astro_core::{PluginHost, default_plugin_dirs};
+use astro_core::Formats;
 use tauri::{Manager, State};
 use tauri::ipc::Channel;
 use serde::{Deserialize, Serialize};
@@ -215,22 +214,6 @@ pub struct RejectedDto {
 
 /// Where a development run finds the format plugins.
 ///
-/// The shell has its own cargo workspace, so its executable lands somewhere the
-/// plugins do not: they are built by the workspace at the top of the project.
-/// The path is compiled in rather than searched for, and only into a debug
-/// build — a release is a folder with the plugins beside the binary, and
-/// nothing here should teach it otherwise.
-#[cfg(debug_assertions)]
-fn development_dirs() -> Vec<PathBuf> {
-    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target");
-    vec![target.join("release"), target.join("debug")]
-}
-
-#[cfg(not(debug_assertions))]
-fn development_dirs() -> Vec<PathBuf> {
-    Vec::new()
-}
-
 /// What a running pass reports back while it runs.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "stage")]
@@ -375,49 +358,26 @@ struct Stopped {
     survey: astro_core::pipeline::Survey,
 }
 
-/// The plugins, loaded once and kept for the life of the window.
+/// The decoders this window was built with, assembled once.
 ///
-/// Once rather than per command. A fresh host per command meant the plugin
-/// libraries were mapped and unmapped again on every action, and unmapping one
-/// is what killed the process: the Canon plugin's decoder keeps a pool of
-/// worker threads parked inside its own library between frames, so the mapping
-/// has to outlive them, and there is no moment at which it is known to. Loading
-/// once removes the question rather than answering it — and saves re-reading
-/// the plugin folders every time a button is pressed.
-///
-/// The failure is remembered too. A window with no plugin cannot read a frame
-/// whichever command asks, and re-scanning the folders to fail again each time
-/// would only make the answer slower.
-fn host() -> Result<&'static PluginHost, String> {
-    static LOADED: std::sync::OnceLock<Result<PluginHost, String>> = std::sync::OnceLock::new();
-    LOADED.get_or_init(load_plugins).as_ref().map_err(|why| why.clone())
+/// Once rather than per command, and named rather than discovered: what the
+/// window can read is a fact about the build. Assembling it once also means the
+/// log names the formats before anything can go wrong inside one.
+fn host() -> Result<&'static Formats, String> {
+    static LOADED: std::sync::OnceLock<Result<Formats, String>> = std::sync::OnceLock::new();
+    LOADED.get_or_init(load_formats).as_ref().map_err(|why| why.clone())
 }
 
-fn load_plugins() -> Result<PluginHost, String> {
-    let mut host = PluginHost::new();
-    let mut failures = Vec::new();
-    for dir in default_plugin_dirs().into_iter().chain(development_dirs()) {
-        let report = host.load_dir(&dir);
-        for (path, error) in report.failures {
-            failures.push(format!("{}: {error:#}", path.display()));
-        }
+fn load_formats() -> Result<Formats, String> {
+    let mut formats = Formats::new();
+    formats.add(astro_format_canon::Canon::new()).map_err(|why| format!("{why:#}"))?;
+    for format in formats.formats() {
+        let description = format.description();
+        log::info!("reads {} ({})", description.extensions.join(", "), description.id);
     }
-    if host.is_empty() {
-        // A window with no format plugin opens, looks healthy and reads nothing.
-        // Saying so here is the only place it can be caught before the user
-        // concludes their frames are broken.
-        let mut message = String::from("no format plugin loaded, so no frame can be read");
-        if !failures.is_empty() {
-            message.push_str(": ");
-            message.push_str(&failures.join("; "));
-        }
-        return Err(message);
-    }
-    for plugin in host.plugins() {
-        log::info!("plugin {} reads {}", plugin.id(), plugin.description().extensions.join(", "));
-    }
-    Ok(host)
+    Ok(formats)
 }
+
 
 #[tauri::command]
 fn scan_session(roots: Roots) -> Result<SessionDto, String> {

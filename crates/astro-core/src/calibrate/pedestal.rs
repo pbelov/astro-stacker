@@ -21,7 +21,7 @@
 //! cells, which after normalisation is a colour cast rather than an offset. It
 //! is right for a report and wrong for arithmetic.
 
-use astro_plugin_abi::abi::{CFA_MAX_CELLS, ImageLayout};
+use crate::frame::{CFA_MAX_CELLS, ImageLayout};
 
 /// Columns at the very edge of the sensor read a little high on some bodies.
 const HEAD_GUARD: usize = 8;
@@ -157,7 +157,7 @@ pub fn from_masked_columns(pixels: &[f32], layout: &ImageLayout) -> Option<Pedes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use astro_plugin_abi::abi::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
+    use crate::frame::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
 
     /// A frame with a masked strip on the left whose four mosaic cells sit at
     /// four different levels, which is what a real sensor does.

@@ -34,7 +34,7 @@
 //! because a gain of `g` sends `scale -> scale/g` and `sigma -> g*sigma`,
 //! leaving `scale * sigma` and therefore the weight untouched.
 
-use astro_plugin_abi::abi::ImageLayout;
+use crate::frame::ImageLayout;
 use rayon::prelude::*;
 
 use crate::register::Transform;
@@ -620,7 +620,7 @@ fn span(lo: f64, hi: f64, centre: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use astro_plugin_abi::abi::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
+    use crate::frame::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
 
     fn layout(width: usize, height: usize) -> ImageLayout {
         let mut layout = ImageLayout {

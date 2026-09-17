@@ -1,8 +1,12 @@
-//! Canon CR2 and CR3 support, as a loadable plugin.
+//! Canon CR2 and CR3 support.
 //!
 //! Decoding is delegated to [`rawler`], which is pure Rust — no CMake, no
 //! vcpkg, no C toolchain. This crate's job is to map rawler's model onto the
-//! stacker's ABI, and to be honest about what it cannot express.
+//! stacker's own, and to be honest about what it cannot express.
+//!
+//! rawler reads far more than Canon, and this crate declares only what has been
+//! run against real frames from real bodies. Claiming a format nobody has tried
+//! would be claiming it works.
 
 mod datetime;
 mod magic;
@@ -10,12 +14,11 @@ mod magic;
 use std::path::Path;
 use std::sync::Mutex;
 
-use astro_plugin_abi::abi::{
-    CFA_MAX_CELLS, CFA_MAX_DIM, COLOR_BLUE, COLOR_GREEN, COLOR_RED, ImageLayout, PROBE_UNSUPPORTED,
-    SampleFormat,
+use astro_core::format::{Format, Frame};
+use astro_core::frame::{
+    CFA_MAX_CELLS, CFA_MAX_DIM, COLOR_BLUE, COLOR_GREEN, COLOR_RED, FormatDescription, FrameInfo,
+    ImageLayout, PROBE_CERTAIN, PROBE_UNSUPPORTED, SampleFormat, samples_u16_mut,
 };
-use astro_plugin_abi::export::FormatPlugin;
-use astro_plugin_abi::safe::{FrameInfo, PluginDescription, PluginError, samples_u16_mut};
 use rawler::cfa::CFAColor;
 use rawler::decoders::{Decoder, RawDecodeParams, RawMetadata};
 use rawler::formats::tiff::Rational;
@@ -23,86 +26,111 @@ use rawler::rawimage::RawPhotometricInterpretation;
 use rawler::rawsource::RawSource;
 use rawler::{RawImage, RawImageData};
 
+const ID: &str = "canon-raw";
 const EXTENSIONS: [&str; 2] = ["cr2", "cr3"];
 
+/// The decoder itself: no state, since everything it needs comes with the file.
+pub struct Canon {
+    description: FormatDescription,
+}
+
+impl Default for Canon {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Canon {
+    pub fn new() -> Self {
+        Self { description: describe() }
+    }
+}
+
+/// One Canon file, opened and understood.
 pub struct CanonRaw {
+    /// Kept so a failure partway through decoding can say which file it was.
+    path: std::path::PathBuf,
     /// Memory-mapped file. Kept open so decoding does not re-read from disk.
     source: RawSource,
-    /// `rawler`'s decoders are `Send` but not `Sync`, and the ABI allows the
-    /// host to call into a handle from whichever worker thread owns it.
+    /// `rawler`'s decoders are `Send` but not `Sync`, and a frame is read from
+    /// whichever worker thread owns it.
     decoder: Mutex<Box<dyn Decoder>>,
     layout: ImageLayout,
     info: FrameInfo,
 }
 
-impl FormatPlugin for CanonRaw {
-    fn description() -> PluginDescription {
-        PluginDescription {
-            id: "canon-raw".to_owned(),
+fn describe() -> FormatDescription {
+    FormatDescription {
+        id: ID.to_owned(),
             display_name: "Canon CR2/CR3".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             author: "Pavel Belov".to_owned(),
-            extensions: EXTENSIONS.iter().map(|e| (*e).to_owned()).collect(),
-        }
+        extensions: EXTENSIONS.iter().map(|e| (*e).to_owned()).collect(),
+    }
+}
+
+impl Format for Canon {
+    fn description(&self) -> &FormatDescription {
+        &self.description
     }
 
-    fn probe(_path: &Path, header: &[u8]) -> i32 {
-        magic::identify(header).map_or(PROBE_UNSUPPORTED, |_| astro_plugin_abi::abi::PROBE_CERTAIN)
+    fn probe(&self, _path: &Path, header: &[u8]) -> i32 {
+        magic::identify(header).map_or(PROBE_UNSUPPORTED, |_| PROBE_CERTAIN)
     }
 
-    fn open(path: &Path) -> Result<Self, PluginError> {
-        let source = RawSource::new(path).map_err(|err| PluginError::io(err.to_string()))?;
+    fn open(&self, path: &Path) -> astro_core::Result<Box<dyn Frame>> {
+        CanonRaw::open(path)
+            .map(|frame| Box::new(frame) as Box<dyn Frame>)
+            .map_err(|why| why.at(path))
+    }
+}
+
+impl CanonRaw {
+    fn open(path: &Path) -> Result<Self, Unreadable> {
+        let source = RawSource::new(path).map_err(|err| Unreadable::io(err.to_string()))?;
         let decoder = rawler::get_decoder(&source)
-            .map_err(|err| PluginError::unsupported(err.to_string()))?;
+            .map_err(|err| Unreadable::unsupported(err.to_string()))?;
 
         // Metadata first: the orientation in the layout has to come from EXIF,
         // because rawler does not carry it on the decoded image (see
         // `exif_orientation`).
         let metadata = decoder
             .raw_metadata(&source, &RawDecodeParams::default())
-            .map_err(|err| PluginError::parse(err.to_string()))?;
+            .map_err(|err| Unreadable::parse(err.to_string()))?;
 
         // `dummy` builds the full description — dimensions, CFA, levels — while
         // skipping the expensive pixel decompression. Opening a frame stays
         // cheap, which matters when a session holds hundreds of them.
         let described = decoder
             .raw_image(&source, &RawDecodeParams::default(), true)
-            .map_err(|err| PluginError::parse(err.to_string()))?;
+            .map_err(|err| Unreadable::parse(err.to_string()))?;
 
         let layout = layout_from(&described, &metadata)?;
         let info = info_from(&metadata);
 
-        Ok(Self { source, decoder: Mutex::new(decoder), layout, info })
+        Ok(Self { path: path.to_owned(), source, decoder: Mutex::new(decoder), layout, info })
     }
 
-    fn layout(&self) -> Result<ImageLayout, PluginError> {
-        Ok(self.layout)
-    }
-
-    fn info(&self) -> Result<FrameInfo, PluginError> {
-        Ok(self.info.clone())
-    }
-
-    fn read_samples(&self, dst: &mut [u8]) -> Result<(), PluginError> {
+    fn decode_into(&self, dst: &mut [u8]) -> Result<(), Unreadable> {
         let samples = samples_u16_mut(dst).ok_or_else(|| {
-            PluginError::invalid_argument("destination buffer is misaligned for 16-bit samples")
+            Unreadable::invalid_argument("destination buffer is misaligned for 16-bit samples")
         })?;
 
         let decoder = self
             .decoder
             .lock()
-            .map_err(|_| PluginError::internal("decoder lock was poisoned by an earlier panic"))?;
+            .map_err(|_| Unreadable::internal("decoder lock was poisoned by an earlier panic"))?;
         let image = decoder
             .raw_image(&self.source, &RawDecodeParams::default(), false)
-            .map_err(|err| PluginError::parse(err.to_string()))?;
+            .map_err(|err| Unreadable::parse(err.to_string()))?;
 
         let RawImageData::Integer(data) = image.data else {
-            return Err(PluginError::internal(
+            return Err(Unreadable::internal(
                 "decoder returned floating-point data after describing an integer frame",
             ));
         };
         if data.len() != samples.len() {
-            return Err(PluginError::internal(format!(
+            return Err(Unreadable::internal(format!(
                 "decoder produced {} samples but the layout promised {}",
                 data.len(),
                 samples.len()
@@ -113,15 +141,61 @@ impl FormatPlugin for CanonRaw {
     }
 }
 
-astro_plugin_abi::export_plugin!(CanonRaw);
+impl Frame for CanonRaw {
+    fn layout(&self) -> &ImageLayout {
+        &self.layout
+    }
+
+    fn info(&self) -> &FrameInfo {
+        &self.info
+    }
+
+    fn read_samples(&self, dst: &mut [u8]) -> astro_core::Result<()> {
+        self.decode_into(dst).map_err(|why| why.at(&self.path))
+    }
+}
+
+/// Why a file could not be read, before it is attached to the file.
+///
+/// The decoder knows what went wrong; which file it was is the caller's to say,
+/// so the two are joined at the boundary rather than threaded through every
+/// helper.
+struct Unreadable(String);
+
+impl Unreadable {
+    fn io(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+    fn unsupported(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+    fn parse(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+    fn invalid_argument(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+    fn internal(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    fn at(self, path: &Path) -> astro_core::Error {
+        astro_core::Error::Decode {
+            format: ID.to_owned(),
+            action: "read",
+            path: path.to_owned(),
+            message: self.0,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // rawler -> ABI
 // ---------------------------------------------------------------------------
 
-fn layout_from(raw: &RawImage, metadata: &RawMetadata) -> Result<ImageLayout, PluginError> {
+fn layout_from(raw: &RawImage, metadata: &RawMetadata) -> Result<ImageLayout, Unreadable> {
     if !matches!(raw.data, RawImageData::Integer(_)) {
-        return Err(PluginError::unsupported(
+        return Err(Unreadable::unsupported(
             "this plugin only reads integer sensor data; no Canon format produces floating-point raw",
         ));
     }

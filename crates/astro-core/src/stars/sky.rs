@@ -15,7 +15,7 @@
 //! the sky before it found a faint star. Every estimate here is per
 //! colour-filter index.
 
-use astro_plugin_abi::abi::ImageLayout;
+use crate::frame::ImageLayout;
 
 use crate::session::mosaic::Mosaic;
 
@@ -170,7 +170,7 @@ fn median_of(values: &mut [f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use astro_plugin_abi::abi::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
+    use crate::frame::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
 
     /// Deterministic noise, because a threshold measured in units of the noise
     /// needs there to be some. Three uniforms summed is near enough Gaussian.

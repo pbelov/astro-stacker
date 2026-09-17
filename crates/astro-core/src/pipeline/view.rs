@@ -8,7 +8,7 @@
 //! Shared by the command line's TIFF and by the window's preview so the two
 //! cannot show the same stack differently.
 
-use astro_plugin_abi::abi::ImageLayout;
+use crate::frame::ImageLayout;
 
 use crate::session::mosaic::Mosaic;
 

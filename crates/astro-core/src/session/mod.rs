@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use astro_plugin_abi::abi::ImageLayout;
-use astro_plugin_abi::safe::FrameInfo;
+use crate::frame::ImageLayout;
+use crate::frame::FrameInfo;
 
 pub mod compat;
 pub mod kind;

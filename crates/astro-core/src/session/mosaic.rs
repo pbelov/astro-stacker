@@ -6,7 +6,7 @@
 //! and two modules that disagreed about either would silently read every
 //! photosite as the wrong colour.
 
-use astro_plugin_abi::abi::{CFA_MAX_CELLS, ImageLayout};
+use crate::frame::{CFA_MAX_CELLS, ImageLayout};
 
 /// A rectangle of photosites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +118,7 @@ impl PatternCells for ImageLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use astro_plugin_abi::abi::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
+    use crate::frame::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
 
     fn gbrg() -> ImageLayout {
         // The reference body's pattern, which is not the RGGB most code assumes.

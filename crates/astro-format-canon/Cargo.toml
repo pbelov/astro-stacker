@@ -1,0 +1,14 @@
+[package]
+name = "astro-format-canon"
+description = "Canon CR2/CR3 reader for astro-stacker"
+version.workspace = true
+edition.workspace = true
+# Not the workspace's: the floor here is rawler's rather than ours, and this
+# crate is the only one that has to meet it.
+rust-version = "1.88"
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+astro-core.workspace = true
+rawler.workspace = true

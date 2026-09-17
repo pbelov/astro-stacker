@@ -12,7 +12,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use astro_core::calibrate::{apply, fits};
 use astro_core::session::{FrameId, FrameKind, Session};
-use astro_core::{PluginHost, Samples};
+use astro_core::{Formats, Samples};
 use clap::{ArgMatches, Args};
 
 use crate::format;
@@ -42,7 +42,7 @@ pub struct CalibrateArgs {
     pub keep_masters: bool,
 }
 
-pub fn run(host: &PluginHost, args: &CalibrateArgs, matches: &ArgMatches) -> Result<()> {
+pub fn run(host: &Formats, args: &CalibrateArgs, matches: &ArgMatches) -> Result<()> {
     let (options, tolerances) = options_from(&args.scan, matches)?;
     let report = astro_core::session::scan(host, &options)?;
     let partition = report.session.partition(&tolerances);
@@ -92,7 +92,7 @@ pub fn run(host: &PluginHost, args: &CalibrateArgs, matches: &ArgMatches) -> Res
 }
 
 fn calibrate_one(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     id: FrameId,
     masters: &MasterSet,
@@ -142,7 +142,7 @@ fn calibrate_one(
         iso: session[id].info.iso,
         frames: 1,
         combination: "calibrated".to_owned(),
-        bayer_pattern: astro_plugin_abi::safe::cfa_pattern_name(frame.layout()),
+        bayer_pattern: astro_core::cfa_pattern_name(frame.layout()),
         notes: vec![describe(masters)],
     };
     let target = out.join(format!("{name}_calibrated.fits"));

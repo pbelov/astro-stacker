@@ -4,8 +4,8 @@
 //! frames nobody has to own: a 45-megapixel Canon R5 light, and the calibration
 //! frames that would go with it.
 
-use astro_plugin_abi::abi::{COLOR_BLUE, COLOR_GREEN, COLOR_RED, ImageLayout, SampleFormat};
-use astro_plugin_abi::safe::FrameInfo;
+use crate::frame::{COLOR_BLUE, COLOR_GREEN, COLOR_RED, ImageLayout, SampleFormat};
+use crate::frame::FrameInfo;
 
 use super::{BodyKey, DirId, FrameFingerprint, FrameRecord, FrameRole, FrameSource, GroupId, PluginId};
 

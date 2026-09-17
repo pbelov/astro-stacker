@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use astro_core::PluginHost;
+use astro_core::Formats;
 use astro_core::calibrate::{CombineOptions, Master, build, fits};
 use astro_core::session::{FrameKind, FrameSet, Partition, Session, StackPlan, scan};
 use clap::{ArgMatches, Args};
@@ -30,7 +30,7 @@ pub struct MasterArgs {
 
 pub use astro_core::pipeline::{MasterSet, Wanted};
 
-pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result<()> {
+pub fn run(host: &Formats, args: &MasterArgs, matches: &ArgMatches) -> Result<()> {
     let (options, tolerances) = options_from(&args.scan, matches)?;
     let report = scan(host, &options)?;
     let partition = report.session.partition(&tolerances);
@@ -72,7 +72,7 @@ pub fn run(host: &PluginHost, args: &MasterArgs, matches: &ArgMatches) -> Result
 /// session.
 #[allow(clippy::too_many_arguments)]
 pub fn build_masters(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     partition: &Partition,
     plan: &StackPlan,
@@ -118,7 +118,7 @@ pub fn build_masters(
 }
 
 fn build_one(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     set: &FrameSet,
     options: &CombineOptions,

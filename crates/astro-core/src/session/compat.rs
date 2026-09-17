@@ -12,7 +12,7 @@
 //! one from the other is imperfect and useful, and a stacker that refuses it is
 //! worse than one that does it and says so.
 
-use astro_plugin_abi::abi::{CFA_MAX_CELLS, ImageLayout, SampleFormat};
+use crate::frame::{CFA_MAX_CELLS, ImageLayout, SampleFormat};
 
 use super::{FrameKind, FrameRecord};
 
@@ -89,7 +89,7 @@ impl GeometryKey {
             ..Default::default()
         };
         layout.cfa_pattern = self.cfa_pattern;
-        astro_plugin_abi::safe::cfa_pattern_name(&layout)
+        crate::frame::cfa_pattern_name(&layout)
     }
 
     /// How the sensor reads in a report.

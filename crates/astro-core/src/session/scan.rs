@@ -7,9 +7,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use astro_plugin_abi::abi::PROBE_HEADER_BYTES;
-use astro_plugin_abi::safe::FrameInfo;
-use astro_plugin_abi::abi::ImageLayout;
+use crate::frame::PROBE_HEADER_BYTES;
+use crate::frame::FrameInfo;
+use crate::frame::ImageLayout;
 use rayon::prelude::*;
 
 use super::kind::{self, FrameKind};
@@ -18,7 +18,7 @@ use super::{
     FrameSource, GroupId, Inference, Rejection, Session,
 };
 use crate::error::{Error, Result};
-use crate::plugin::PluginHost;
+use crate::format::Formats;
 
 /// How a directory or file the user named should be treated.
 #[derive(Debug, Clone, PartialEq)]
@@ -112,7 +112,7 @@ pub struct ScanReport {
 /// it is grouped. Grouping by exposure first would drop a two-second framing
 /// exposure into the flat set, and every light in the stack would then be
 /// divided by a picture of the sky.
-pub fn scan(host: &PluginHost, options: &ScanOptions) -> Result<ScanReport> {
+pub fn scan(host: &Formats, options: &ScanOptions) -> Result<ScanReport> {
     scan_with_progress(host, options, &|_| {})
 }
 
@@ -122,7 +122,7 @@ pub fn scan(host: &PluginHost, options: &ScanOptions) -> Result<ScanReport> {
 /// called once per frame opened, which is often enough for a progress bar and
 /// rare enough not to matter.
 pub fn scan_with_progress(
-    host: &PluginHost,
+    host: &Formats,
     options: &ScanOptions,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<ScanReport> {
@@ -225,13 +225,13 @@ struct Scanned {
     fingerprint: FrameFingerprint,
 }
 
-fn open_one(host: &PluginHost, path: &Path) -> std::result::Result<Scanned, Rejection> {
+fn open_one(host: &Formats, path: &Path) -> std::result::Result<Scanned, Rejection> {
     let fingerprint = fingerprint(path).map_err(|err| Rejection::Unreadable { detail: err.to_string() })?;
     match host.open(path) {
         Ok(frame) => Ok(Scanned {
             layout: *frame.layout(),
             info: frame.info().clone(),
-            plugin: frame.plugin().id().to_owned(),
+            plugin: frame.format().description().id.clone(),
             fingerprint,
         }),
         Err(Error::UnsupportedFormat { .. }) => Err(Rejection::NotAFrame),
@@ -306,7 +306,7 @@ fn deepest_rule<'a>(rules: &'a [RoleRule], path: &Path) -> Option<&'a RoleRule> 
 /// sensor, too low on a small one. Returns the frame it opened so the caller
 /// does not pay for it twice.
 fn size_the_pool(
-    host: &PluginHost,
+    host: &Formats,
     candidates: &[PathBuf],
     budget_bytes: u64,
 ) -> (usize, Option<Scanned>) {

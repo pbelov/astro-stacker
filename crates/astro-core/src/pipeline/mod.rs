@@ -21,14 +21,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use astro_plugin_abi::abi::ImageLayout;
+use crate::frame::ImageLayout;
 use rayon::prelude::*;
 
 use crate::calibrate::{CombineOptions, Master, apply_into, build};
 use crate::error::{Error, Result};
 use crate::session::{FrameId, FrameKind, Partition, SetId, Session, StackPlan};
 use crate::stars::{DetectOptions, Detection, Scratch, detect_with};
-use crate::{PluginHost, Samples};
+use crate::{Formats, Samples};
 
 /// The three masters a light needs, each `None` where nothing was matched.
 ///
@@ -117,7 +117,7 @@ impl Wanted {
 /// The bias, then the dark, then the flat: the order they are applied in, which
 /// is also the order a reader wants them in.
 pub fn masters(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     partition: &Partition,
     plan: &StackPlan,
@@ -324,7 +324,7 @@ impl<'a> Reporter<'a> {
 /// chooses its reference from the middle of the run and chains its seeds
 /// between neighbours, so an index there means a position in the night.
 pub fn survey(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     lights: &[FrameId],
     masters: &MasterSet,
@@ -341,7 +341,7 @@ pub fn survey(
 /// produces the same star lists as measuring it one frame at a time.
 #[allow(clippy::too_many_arguments)]
 pub fn survey_with_workers(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     lights: &[FrameId],
     masters: &MasterSet,
@@ -482,7 +482,7 @@ struct Lane {
 
 #[allow(clippy::too_many_arguments)]
 fn read_one(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     id: FrameId,
     name: &str,

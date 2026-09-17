@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use astro_core::PluginHost;
+use astro_core::Formats;
 use astro_core::calibrate::{fits, tiff};
 use astro_core::integrate::{DEFAULT_PIXFRAC, Rejection};
 use astro_core::pipeline::stack::{
@@ -105,7 +105,7 @@ pub struct StackArgs {
     pub look_ahead: Option<usize>,
 }
 
-pub fn run(host: &PluginHost, args: &StackArgs, matches_of: &ArgMatches) -> Result<()> {
+pub fn run(host: &Formats, args: &StackArgs, matches_of: &ArgMatches) -> Result<()> {
     if !(0.0..=2.0).contains(&args.sharpness) {
         bail!("--sharpness {} is outside 0 to 2", args.sharpness);
     }

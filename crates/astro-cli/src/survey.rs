@@ -5,7 +5,7 @@
 //! drifts. What is left here is the argument group and the lines it prints.
 
 use anyhow::{Result, bail};
-use astro_core::PluginHost;
+use astro_core::Formats;
 use astro_core::calibrate::Method;
 pub use astro_core::pipeline::{Flow, MasterSet, Step, Survey};
 use astro_core::session::FrameId;
@@ -77,7 +77,7 @@ impl std::ops::Deref for Read {
 /// Reads a run: scans, builds masters, then calibrates and measures every
 /// selected light.
 pub fn read(
-    host: &PluginHost,
+    host: &Formats,
     scan: &ScanArgs,
     matches: &ArgMatches,
     args: &SurveyArgs,

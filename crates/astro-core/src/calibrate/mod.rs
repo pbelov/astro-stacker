@@ -35,11 +35,11 @@ pub mod fits;
 pub mod tiff;
 pub mod pedestal;
 
-use astro_plugin_abi::abi::{CFA_MAX_CELLS, ImageLayout};
-use astro_plugin_abi::safe::FrameInfo;
+use crate::frame::{CFA_MAX_CELLS, ImageLayout};
+use crate::frame::FrameInfo;
 
 use crate::error::{Error, Result};
-use crate::plugin::PluginHost;
+use crate::format::Formats;
 use crate::session::{FrameKind, FrameSet, Session};
 
 pub use combine::{CombineOptions, Combined, Method};
@@ -132,7 +132,7 @@ impl Master {
             iso: self.info.iso,
             frames: self.frames,
             combination: self.method.name().to_owned(),
-            bayer_pattern: astro_plugin_abi::safe::cfa_pattern_name(&self.layout),
+            bayer_pattern: crate::frame::cfa_pattern_name(&self.layout),
             notes,
         }
     }
@@ -157,7 +157,7 @@ fn trim(value: f64) -> String {
 /// A flat additionally has its own zero point removed and is normalised; a bias
 /// or a dark is the combination and nothing more.
 pub fn build(
-    host: &PluginHost,
+    host: &Formats,
     session: &Session,
     set: &FrameSet,
     options: &CombineOptions,
@@ -358,7 +358,7 @@ pub fn apply_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use astro_plugin_abi::abi::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
+    use crate::frame::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
 
     fn layout(width: usize, height: usize, active_x: u32) -> ImageLayout {
         let mut layout = ImageLayout {

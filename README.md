@@ -2,8 +2,8 @@
 
 A stacker for deep-sky astrophotography: calibrate, align and integrate light
 frames into one deep image. In the spirit of DeepSkyStacker, but faster, and
-built so that every image format is a plugin rather than a branch in a switch
-statement.
+built so that no image format is a branch in a switch statement: each is a crate
+of its own, and the pipeline asks a registry rather than naming one.
 
 **Status: 0.6.0 — it calibrates.** Point it at a night's folder and it groups
 the frames into stackable sets, matches darks, flats and biases to the lights,
@@ -20,10 +20,9 @@ whole night is read and grouped in 0.13 s.
 
 | Crate | Role |
 |---|---|
-| [`astro-plugin-abi`](crates/astro-plugin-abi) | The frozen C ABI between host and plugins, plus a safe wrapper for writing them |
-| [`astro-core`](crates/astro-core) | Plugin discovery, frame reading, and the session model: classification, grouping and compatibility |
+| [`astro-core`](crates/astro-core) | The frame model, the format registry, and the session model: classification, grouping and compatibility |
 | [`astro-cli`](crates/astro-cli) | `astro-stacker` command line binary |
-| [`astro-format-canon`](plugins/astro-format-canon) | Canon CR2/CR3 reader, built on [rawler](https://crates.io/crates/rawler) |
+| [`astro-format-canon`](crates/astro-format-canon) | Canon CR2/CR3 reader, built on [rawler](https://crates.io/crates/rawler) |
 
 ## Building
 
@@ -35,19 +34,15 @@ cargo build --release
 
 For a release you can hand to someone, `build.bat` runs the tests and clippy,
 builds both the command line and the window, and stages a portable folder with
-the two of them and their plugins into `build/`, beside a zip of the same:
+the two of them into `build/`, beside a zip of the same:
 
 ```
 build.bat
 ```
 
-The staging step is not packaging for its own sake. Neither program reads a
-frame format on its own — every format arrives as a loadable library — so a build
-that forgot the plugins still starts, still prints its help, and silently reads
-nothing. The script therefore runs the staged binary and checks that it lists the
-Canon plugin before it calls the build done. Both programs search for plugins the
-same way, from the directory they are in, so one `plugins` folder serves both and
-one check covers the layout for both. What it does not cover is the window
+The script runs the staged binary and checks that it lists the Canon format
+before calling the build done — a binary that built but cannot read a frame
+starts, prints its help and looks healthy. What it does not cover is the window
 itself: it is a window, so a script cannot ask it anything, and it additionally
 wants WebView2 on whatever machine opens it.
 
@@ -81,10 +76,10 @@ that rule moved into the core rather than being written a second time.
 
 ## Trying it
 
-List the format plugins that loaded:
+List the formats it reads:
 
 ```bash
-cargo run --bin astro-stacker -- plugins
+cargo run --bin astro-stacker -- formats
 ```
 
 Describe one frame, and decode it to confirm the pixels really read:
@@ -152,11 +147,12 @@ which calibration set fits best, and what about that fit is worth telling you.
 
 ## Design in one paragraph
 
-Formats are dynamic libraries discovered at runtime and reached through a
-`#[repr(C)]` ABI — not Rust traits — so a plugin can be built by a different
-compiler, or written in another language, and keep working. Strings are UTF-8
-and paths carry no platform-native encoding, which is what will make Linux and
-macOS support a port rather than a rewrite. Builds and testing target Windows 11
+Each format is a crate implementing one trait, and the applications say which
+ones they were built with, so the pipeline never names a format and no format is
+a branch inside it. Which decoder gets a file is settled by bidding on its first
+few kilobytes rather than by its extension. Paths carry no platform-native
+assumptions, which is what will make Linux and macOS support a port rather than
+a rewrite. Builds and testing target Windows 11
 for now. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the decisions and
 why they were made, and [docs/BACKLOG.md](docs/BACKLOG.md) for what is agreed to
 be worth doing next.

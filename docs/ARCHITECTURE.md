@@ -13,37 +13,46 @@ builds with `cargo build` and no C toolchain, CMake or vcpkg. Memory safety and
 `rayon` are what make a hundreds-of-frames pipeline tractable without a class of
 bug that is very hard to find in a numerical codebase.
 
-### Formats are dynamic libraries, not Rust traits
+### Formats are crates, and the core names none of them
 
-A plugin is a `.dll` discovered at runtime and reached through a `#[repr(C)]`
-ABI. Rust traits would have been simpler and faster to write, and would have
-made every format a compile-time dependency of the application — exactly the
-coupling this project exists to avoid.
+A decoder is a crate implementing `Format` and `Frame` from
+`astro-core::format`. The applications say which ones they were built with; the
+core asks the registry and never names one, so no format is a branch inside the
+pipeline.
 
-The consequences are deliberate:
+**This replaces a runtime plugin ABI, and the reversal is the decision worth
+recording.** Formats were `.dll`s discovered at runtime behind a frozen
+`#[repr(C)]` contract, chosen so a format could be added without rebuilding the
+application, by a different compiler or another language. Two years of that
+argument met one night of measurement and lost on three counts.
 
-* Anything can implement a plugin: a different Rust version, C++, or Zig.
-* No Rust types cross the boundary. No `String`, `Vec`, `Option`, `Result`, or
-  data-carrying enums.
-* Whoever allocates, frees. On Windows each DLL may carry its own CRT heap, so
-  freeing across the boundary corrupts memory instead of failing loudly. Large
-  pixel buffers are therefore allocated by the host and filled by the plugin.
-* Panics must not unwind across the boundary. `export_plugin!` contains them.
-* `ABI_VERSION` is checked in both directions at load. There is no forward
-  compatibility: a mismatch refuses to load rather than guessing.
-* **Once loaded, a plugin is never unloaded.** A plugin is a whole program's
-  worth of code and may start threads; this project's own Canon plugin does,
-  because its decoder brings a work-stealing pool that parks inside the library
-  between frames. Unmapping a library under a parked thread leaves it to wake in
-  memory that is gone, and that is not an error anything can catch — the process
-  ends, and the fault is reported against a module that by then does not exist.
-  Nothing in the ABI can make unloading safe, because nothing in it can ask
-  whether a plugin left something running, and a plugin has no way to promise it
-  did not. One mapping per format for the life of the process is the whole of
-  the cost.
+It bought nothing on size. Every decoder here rests on `rawler`, which reads
+some 1800 cameras in one library, so a second per-vendor plugin would have been
+another copy of the same six megabytes rather than a smaller download. A
+boundary drawn where the implementations do not differ separates nothing.
 
-Layout sizes are asserted in `astro-plugin-abi`'s tests so that changing a
-struct fails the build rather than silently breaking installed plugins.
+It bought nothing on licensing either, which was the other claim made for it.
+`rawler` is LGPL-2.1, and an open-source application satisfies §6(a) by
+publishing its source; the boundary only matters to a closed build, which this
+is not. If that changes, a decoder behind a `cdylib` is the way back, and this
+section is the record of how it worked.
+
+And it cost a crash that killed the process with nothing in any log. A plugin is
+a whole program's worth of code and may start threads — this project's decoder
+does, since `rawler` brings a work-stealing pool that parks inside the library
+between frames. A host that dropped its plugins at the end of each command
+unmapped the library under those parked threads, and they woke in memory that
+was gone: no panic, no unwinding, and a fault reported against a module that by
+then did not exist. Nothing in the ABI could have prevented it, because nothing
+in it could ask whether a plugin had left something running.
+
+What is kept from the old design is the part that was right. A decoder still
+bids for a file rather than claiming an extension: each is shown the path and
+the first 4 KiB and answers with a confidence, and the highest bid wins. That is
+what lets a decoder that reads a container properly outrank one that recognises
+only the suffix, and it is how a specialised decoder would override a general
+one if a second ever arrives.
+
 
 ### Portable by construction, built only for Windows
 
@@ -61,12 +70,12 @@ Deferred: installers, CI runners, and platform-specific I/O tuning.
 
 Stacking is dominated by disk and memory bandwidth more often than by
 arithmetic. Correct results and honest measurements come first; acceleration
-goes where the measurements point. The plugin architecture leaves room for a GPU
+goes where the measurements point. The format registry leaves room for a GPU
 backend to arrive without disturbing the frame model.
 
 ### Timestamps are read as UTC
 
-EXIF records wall-clock time with no zone. The Canon plugin interprets it as
+EXIF records wall-clock time with no zone. The Canon decoder interprets it as
 UTC. That is not the true instant, but every frame in a session is off by the
 same constant, so ordering and the intervals between frames — all stacking
 actually needs — are exact.
@@ -177,8 +186,8 @@ second ones.
 
 ### Bit depth is a container width, not a scale
 
-`ImageLayout::bits_per_sample` is whatever the plugin reports as the width of
-the container, and for the Canon plugin that is rawler's `real_bps`, which
+`ImageLayout::bits_per_sample` is whatever the decoder reports as the width of
+the container, and for the Canon decoder that is rawler's `real_bps`, which
 defaults to 16 for every camera whose database entry does not override it.
 Measured on real frames: the 5D Mark IV, R5 and R5 Mark II all report 16 while
 their converters run at 14 bits, and only the 60D reports 14 — because its
@@ -197,7 +206,7 @@ reported rather than fatal.
 
 ### `read_samples` returns sensor readout order
 
-A plugin must never permute the buffer to honour `ImageLayout::orientation`.
+A decoder must never permute the buffer to honour `ImageLayout::orientation`.
 That field is metadata about how an image should be shown, not about how it is
 stored. The host indexes frames against each other photosite by photosite, so
 two frames of one sensor must always agree on what `samples[i]` is, whichever
@@ -443,8 +452,7 @@ added once.
 ## Layout
 
 ```
-crates/astro-plugin-abi   the contract; depends on nothing
-crates/astro-core         plugin host, frame model, and the session:
+crates/astro-core         frame model, format registry, and the session:
     session/kind.rs         what a frame is, and what the evidence suggests
     session/compat.rs       whether two frames may be indexed against each other
     session/sets.rs         partitioning, and matching calibration to lights
@@ -463,30 +471,19 @@ crates/astro-cli          the astro-stacker binary
 apps/desktop              the window: Tauri 2 and Svelte 5
     src-tauri/src/lib.rs    the bridge; holds no decisions of its own
     src/ui/                 palette and parts shared with the sibling projects
-plugins/astro-format-canon  CR2/CR3, via rawler
+crates/astro-format-canon  CR2/CR3, via rawler
 ```
 
-`astro-core` is the only place in the host that touches the C ABI. Everything
-above it works with `OpenFrame` and safe Rust types.
+## Which decoder gets a file
 
-## Plugin discovery
+Each is shown the path and the first 4 KiB, read once, and answers with a
+confidence; the highest bid wins. A decoder is expected to check magic numbers
+rather than trust the extension, which is what makes a file the user named by
+hand readable whatever it is called.
 
-Libraries named `astro_format_*` (plus the platform's `lib` prefix where one
-applies) are loaded from, in order:
-
-1. `<exe dir>/plugins`
-2. `<exe dir>` — which is what makes `cargo run` work, since cargo drops plugin
-   cdylibs next to the binary
-3. any `--plugin-dir` given on the command line
-
-The name filter exists so the host never loads an unrelated library that happens
-to share a directory. A file that looks like a plugin but fails to load is
-reported to the user, never silently skipped: it would otherwise quietly remove
-a supported format.
-
-When several plugins can read a file, each returns a confidence from `probe` and
-the highest bid wins. `probe` sees the first 4 KiB of the file, read once by the
-host, and is expected to check magic numbers rather than trust the extension.
+The extensions a decoder declares narrow a directory walk and nothing else. They
+are also a claim about what has been run against real frames rather than about
+what the underlying library could in principle read.
 
 ## What is deliberately not built yet
 
@@ -526,7 +523,7 @@ Nothing built so far is affected, and that is by design: `xyz_to_cam` and
 and the colour matrix are applied after stacking. But the moment this project
 produces a colour image, a per-body override becomes load-bearing rather than a
 nicety — a modified camera is the normal case in this field, not an edge case.
-The override belongs to the session, not to the plugin: a plugin reports what
+The override belongs to the session, not to the decoder: a decoder reports what
 the file says, and what the file says about a modified body is stale rather than
 wrong.
 

@@ -1,6 +1,6 @@
 # Working on astro-stacker
 
-A DeepSkyStacker alternative: faster, modern, plugin-based. Read
+A DeepSkyStacker alternative: faster and modern. Read
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing anything
 structural — it records which decisions are already settled and why.
 
@@ -27,21 +27,22 @@ cargo test && cargo clippy --all-targets
 
 Both must be clean. Clippy warnings are not tolerated in committed code.
 
-## The plugin ABI is load-bearing
+## Formats are crates, and the core names none of them
 
-`crates/astro-plugin-abi/src/abi.rs` is a frozen contract. Changing a struct or
-signature breaks every installed plugin, so:
+A decoder is a crate under `crates/`, named `astro-format-<something>`,
+implementing `Format` and `Frame` from `astro-core::format`. The applications
+say which decoders they were built with — `formats()` in the CLI, `load_formats`
+in the window — and `astro-core` asks the registry rather than naming one.
 
-* Bump `ABI_VERSION` **and** update the size assertions in
-  `crates/astro-plugin-abi/src/lib.rs` in the same change.
-* Never let a Rust type cross the boundary — no `String`, `Vec`, `Option`,
-  `Result`, or data-carrying enums.
-* Never free memory allocated on the other side.
-* Never let a panic unwind across it.
+That last part is the rule worth keeping: no format may become a branch inside
+the pipeline. Adding one is a crate beside the others and a line where they are
+assembled.
 
-New format support means a new crate under `plugins/`, named
-`astro-format-<vendor>`, built as a `cdylib`, implementing `FormatPlugin` and
-invoking `export_plugin!`. It must not be a branch added to an existing plugin.
+A decoder is named for what it has been run against, not for what its library
+could in principle read. `rawler` reads some 1800 cameras; `astro-format-canon`
+declares `cr2` and `cr3` because those are what real frames from real bodies
+have been decoded and stacked. Claiming a format nobody has tried is claiming it
+works.
 
 ## Conventions
 

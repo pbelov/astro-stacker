@@ -120,11 +120,11 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "astro-cli"
-version = "0.22.5"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "astro-core",
- "astro-plugin-abi",
+ "astro-format-canon",
  "clap",
  "env_logger",
  "log",
@@ -132,10 +132,8 @@ dependencies = [
 
 [[package]]
 name = "astro-core"
-version = "0.22.5"
+version = "0.23.0"
 dependencies = [
- "astro-plugin-abi",
- "libloading",
  "log",
  "rayon",
  "sysinfo",
@@ -144,15 +142,11 @@ dependencies = [
 
 [[package]]
 name = "astro-format-canon"
-version = "0.22.5"
+version = "0.23.0"
 dependencies = [
- "astro-plugin-abi",
+ "astro-core",
  "rawler",
 ]
-
-[[package]]
-name = "astro-plugin-abi"
-version = "0.22.5"
 
 [[package]]
 name = "autocfg"
@@ -838,16 +832,6 @@ dependencies = [
  "hashbrown 0.16.1",
  "no_std_io2",
  "rle-decode-fast",
-]
-
-[[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
-dependencies = [
- "cfg-if",
- "windows-link",
 ]
 
 [[package]]

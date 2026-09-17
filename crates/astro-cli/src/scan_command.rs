@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
-use astro_core::PluginHost;
+use astro_core::Formats;
 use astro_core::session::{
     FrameKind, MAIN_GROUP, RoleRule, ScanOptions, Tolerances, scan_with_progress,
 };
@@ -115,7 +115,7 @@ pub fn options_from(args: &ScanArgs, matches: &ArgMatches) -> Result<(ScanOption
     Ok((options, tolerances))
 }
 
-pub fn run(host: &PluginHost, args: &ScanArgs, matches: &ArgMatches) -> Result<()> {
+pub fn run(host: &Formats, args: &ScanArgs, matches: &ArgMatches) -> Result<()> {
 
     let (options, tolerances) = options_from(args, matches)?;
 

@@ -10,7 +10,7 @@
 //! was built on.
 
 use anyhow::{Result, bail};
-use astro_core::PluginHost;
+use astro_core::Formats;
 use astro_core::register::{Fitted, Registration};
 use astro_core::stars::Star;
 use clap::{ArgMatches, Args};
@@ -36,7 +36,7 @@ pub struct RegisterArgs {
     pub each: bool,
 }
 
-pub fn run(host: &PluginHost, args: &RegisterArgs, matches: &ArgMatches) -> Result<()> {
+pub fn run(host: &Formats, args: &RegisterArgs, matches: &ArgMatches) -> Result<()> {
     let survey = crate::survey::read(host, &args.scan, matches, &args.survey)?;
     if survey.frames.len() < 2 {
         bail!(

@@ -24,7 +24,7 @@
 pub mod shape;
 pub mod sky;
 
-use astro_plugin_abi::abi::ImageLayout;
+use crate::frame::ImageLayout;
 
 use crate::session::mosaic::Mosaic;
 
@@ -709,7 +709,7 @@ fn sky_summary(sky: &Sky, mosaic: &Mosaic) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use astro_plugin_abi::abi::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
+    use crate::frame::{COLOR_BLUE, COLOR_GREEN, COLOR_RED};
 
     fn layout(width: usize, height: usize) -> ImageLayout {
         let mut layout = ImageLayout {

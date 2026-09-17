@@ -1,7 +1,7 @@
 //! Command line front end.
 //!
-//! At this stage it exists to exercise the plugin boundary against real files:
-//! which plugin claimed a frame, what it says the frame is, and whether the
+//! At this stage it exists to exercise the decoders against real files: which
+//! one claimed a frame, what it says the frame is, and whether the
 //! pixels actually decode.
 
 mod align;
@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use astro_core::session::{ColourStats, FrameStats, illumination_map, measure};
-use astro_core::{OpenFrame, PluginHost, Samples, cfa_pattern_name, default_plugin_dirs};
+use astro_core::{Formats, OpenFrame, Samples, cfa_pattern_name};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
 use calibrate_command::CalibrateArgs;
 use master_command::MasterArgs;
@@ -33,10 +33,6 @@ use stars_command::StarsArgs;
 #[derive(Parser)]
 #[command(name = "astro-stacker", version, about = "Stacking for deep-sky astrophotography")]
 pub(crate) struct Cli {
-    /// Load plugins from this directory as well. May be repeated.
-    #[arg(long = "plugin-dir", global = true, value_name = "DIR")]
-    plugin_dirs: Vec<PathBuf>,
-
     /// Print more detail. Repeat for more still.
     #[arg(long, short, global = true, action = ArgAction::Count)]
     verbose: u8,
@@ -47,8 +43,8 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List the format plugins that loaded, and what they read.
-    Plugins,
+    /// List the formats this build reads.
+    Formats,
 
     /// Read a session: group frames into stackable sets, match calibration to
     /// them, and say what does not fit.
@@ -115,10 +111,10 @@ fn main() -> Result<()> {
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
 
-    let host = load_plugins(&cli.plugin_dirs)?;
+    let host = formats()?;
 
     match &cli.command {
-        Command::Plugins => list_plugins(&host),
+        Command::Formats => list_formats(&host),
         Command::Scan(args) => {
             let scan = matches.subcommand_matches("scan").expect("the scan subcommand was matched");
             scan_command::run(&host, args, scan)
@@ -153,46 +149,28 @@ fn main() -> Result<()> {
     }
 }
 
-fn load_plugins(extra_dirs: &[PathBuf]) -> Result<PluginHost> {
-    let mut host = PluginHost::new();
-    let mut searched = Vec::new();
-
-    for dir in default_plugin_dirs().iter().chain(extra_dirs) {
-        if searched.contains(dir) {
-            continue;
-        }
-        searched.push(dir.clone());
-
-        let report = host.load_dir(dir);
-        for id in &report.loaded {
-            log::info!("loaded plugin {id} from {}", dir.display());
-        }
-        // A library that looks like a plugin but does not load is a real
-        // problem for the user: it silently removes a supported format.
-        for (path, error) in &report.failures {
-            eprintln!("warning: {} did not load: {error:#}", path.display());
-        }
-    }
-
-    if host.is_empty() {
-        let list =
-            searched.iter().map(|d| format!("  {}", d.display())).collect::<Vec<_>>().join("\n");
-        bail!("no format plugins found. Searched:\n{list}");
-    }
-    Ok(host)
+/// Every decoder this build was assembled with.
+///
+/// Named here rather than discovered: the decoders are part of the program, so
+/// what it can read is a fact about the build and not about the machine it runs
+/// on. Adding a format is adding a line here and a crate beside it.
+fn formats() -> Result<Formats> {
+    let mut formats = Formats::new();
+    formats.add(astro_format_canon::Canon::new())?;
+    Ok(formats)
 }
 
-fn list_plugins(host: &PluginHost) -> Result<()> {
-    for plugin in host.plugins() {
-        let description = plugin.description();
+fn list_formats(host: &Formats) -> Result<()> {
+    for format in host.formats() {
+        let description = format.description();
         println!("{} {}", description.id, description.version);
         println!("  name       {}", description.display_name);
         println!("  author     {}", description.author);
         println!("  reads      {}", description.extensions.join(", "));
-        println!("  library    {}", plugin.path().display());
     }
     Ok(())
 }
+
 
 /// Decodes each frame and prints the numbers, without judging them.
 ///
@@ -200,7 +178,7 @@ fn list_plugins(host: &PluginHost) -> Result<()> {
 /// against real frames before they are worth encoding. The measurements do not:
 /// whole-frame minimum and maximum turned out to be useless on real data,
 /// because hot and cold photosites pin both ends of every frame alike.
-fn measure_frames(host: &PluginHost, files: &[PathBuf], map: Option<usize>) -> Result<()> {
+fn measure_frames(host: &Formats, files: &[PathBuf], map: Option<usize>) -> Result<()> {
     let mut failures = 0;
 
     for (index, file) in files.iter().enumerate() {
@@ -223,7 +201,7 @@ fn measure_frames(host: &PluginHost, files: &[PathBuf], map: Option<usize>) -> R
     Ok(())
 }
 
-fn measure_frame(host: &PluginHost, file: &Path, map: Option<usize>) -> Result<()> {
+fn measure_frame(host: &Formats, file: &Path, map: Option<usize>) -> Result<()> {
     let frame = host.open(file).with_context(|| format!("opening {}", file.display()))?;
     let samples = frame.decode().with_context(|| format!("decoding {}", file.display()))?;
     let Some(stats) = measure(&samples, frame.layout()) else {
@@ -304,7 +282,7 @@ fn ratio(value: f32) -> String {
     if value.is_finite() { format!("{value:.2}:1") } else { "-".to_owned() }
 }
 
-fn describe_frames(host: &PluginHost, files: &[PathBuf], decode: bool) -> Result<()> {
+fn describe_frames(host: &Formats, files: &[PathBuf], decode: bool) -> Result<()> {
     let mut failures = 0;
 
     for (index, file) in files.iter().enumerate() {
@@ -327,7 +305,7 @@ fn describe_frames(host: &PluginHost, files: &[PathBuf], decode: bool) -> Result
     Ok(())
 }
 
-fn describe_frame(host: &PluginHost, file: &Path, decode: bool) -> Result<()> {
+fn describe_frame(host: &Formats, file: &Path, decode: bool) -> Result<()> {
     let frame = host.open(file).with_context(|| format!("opening {}", file.display()))?;
     print_frame(&frame);
 
@@ -355,11 +333,11 @@ fn describe_frame(host: &PluginHost, file: &Path, decode: bool) -> Result<()> {
 }
 
 fn print_frame(frame: &OpenFrame) {
-    let plugin = frame.plugin().description();
+    let format = frame.format().description();
     let layout = frame.layout();
     let info = frame.info();
 
-    println!("  plugin     {} {} ({})", plugin.id, plugin.version, plugin.display_name);
+    println!("  format     {} {} ({})", format.id, format.version, format.display_name);
     println!("  camera     {} {}", info.camera_make, info.camera_model);
     if !info.lens_model.is_empty() {
         println!("  lens       {}", info.lens_model);
