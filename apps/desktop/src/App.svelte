@@ -633,63 +633,14 @@
     flex-direction: column;
     gap: var(--gap);
   }
-  .bar {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-  h1 {
-    margin: 0;
-    font-size: 20px;
-  }
-  h2 {
-    margin: 0 0 6px;
-    font-size: 14px;
-    color: var(--muted);
-    font-weight: 600;
-  }
-  h3 {
-    margin: 12px 0 4px;
-    font-size: 12px;
-    color: var(--dim);
-    font-weight: 600;
-  }
-
   .zones {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
     gap: var(--gap);
   }
 
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: 14px 16px;
-  }
-  .card.err {
-    border-color: var(--err);
-    background: var(--err-bg);
-  }
-  .card p {
-    margin: 0 0 4px;
-  }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
-  td {
-    padding: 3px 10px 3px 0;
-    border-bottom: 1px solid var(--line);
-  }
-  tr:last-child td {
-    border-bottom: none;
-  }
 
   .roles,
-  .plain,
   .mismatches {
     margin: 0;
     padding: 0;
@@ -715,57 +666,12 @@
   .mismatches li.note {
     color: var(--dim);
   }
-  .mismatches li.warning,
-  .warning {
+  .mismatches li.warning {
     color: var(--warn);
-  }
-  .plain {
-    font-size: 13px;
   }
   .scroll {
     max-height: 190px;
     overflow-y: auto;
-  }
-
-  .muted {
-    color: var(--muted);
-  }
-  .dim {
-    color: var(--dim);
-  }
-  .empty {
-    color: var(--dim);
-    margin: 0;
-  }
-
-  button.primary {
-    font: inherit;
-    cursor: pointer;
-    padding: 7px 16px;
-    border-radius: 8px;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: var(--accent-contrast);
-    font-weight: 600;
-  }
-  button.primary:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-  button.ghost {
-    font: inherit;
-    font-size: 12px;
-    cursor: pointer;
-    text-align: left;
-    padding: 5px 8px;
-    border-radius: 7px;
-    border: 1px solid var(--line);
-    background: none;
-    color: var(--muted);
-  }
-  button.ghost:hover {
-    color: var(--text);
-    border-color: var(--accent);
   }
 
   .scrim {

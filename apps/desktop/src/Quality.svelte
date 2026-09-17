@@ -8,6 +8,7 @@
 
   import { i18n } from "./i18n.svelte";
   import { measurement } from "./measurement.svelte";
+  import { Remaining, roughly } from "./remaining";
 
   let {
     roots,
@@ -62,6 +63,31 @@
   const measure = () => void measurement.start(roots, sigma, maxStars, raw);
   const stop = () => measurement.stop();
 
+  // Оценка живёт здесь, а не в `measurement`: она считается из того, что уже
+  // показано, и ничего не добавляет к прогону. Компонент могут уничтожить и
+  // создать заново - тогда отсчёт начнётся с этого места, что честнее, чем
+  // восстановленный по памяти темп.
+  const clock = new Remaining();
+  let left = $state<number | null>(null);
+
+  $effect(() => {
+    const at = progress;
+    if (!running || at === null) {
+      clock.reset();
+      left = null;
+      return;
+    }
+    clock.saw(at.stage === "master" ? `master:${at.kind}` : "frame", at.done, at.total);
+    left = clock.seconds;
+  });
+
+  /** «осталось ~2 мин» - или ничего, пока темп не измерен. */
+  const timeLeft = $derived.by(() => {
+    if (left === null) return "";
+    const { value, unit } = roughly(left);
+    return i18n.t("timeLeft", { n: value, unit: i18n.t(unit) });
+  });
+
   const share = $derived(
     progress === null
       ? 0
@@ -105,8 +131,8 @@
           name: progress.name,
         })}
       {/if}
+      {#if timeLeft}<span class="left">· {timeLeft}</span>{/if}
     </p>
-    <p class="dim">{i18n.t("measureSlow")}</p>
   </section>
 {/if}
 
@@ -283,6 +309,12 @@
     height: 100%;
     background: var(--accent);
     transition: width 0.15s linear;
+  }
+  /* Оценка стоит рядом со стадией, а не отдельной строкой: она про эту стадию,
+     а не про прогон целиком, и врозь читалась бы как «осталось всего». */
+  .left {
+    color: var(--dim);
+    margin-left: 4px;
   }
 
   .stats td {

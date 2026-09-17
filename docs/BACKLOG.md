@@ -72,15 +72,12 @@ worth stacking are a hand-picked subset is not an exception.
 Done when the five cards together take about half the height they do now, and
 when choosing files is not visibly the lesser of the two ways in.
 
-### The quality step needs a better control and a way to resume
+### A stopped measurement should be continuable
 
-Two things about the same header:
-
-* The Measure button is plain and out of keeping with the rest of the window.
-* A run stopped part way through is currently only a run thrown away. Stopping
-  at a hundred frames to look, then continuing, is the natural way to use a step
-  that takes minutes — and the pipeline already reports frames done out of
-  total, so the state to resume from exists.
+A run stopped part way through is currently only a run thrown away. Stopping at
+a hundred frames to look, then continuing, is the natural way to use a step that
+takes minutes — and the pipeline already reports frames done out of total, so
+the state to resume from exists.
 
 Done when a stopped run can be continued without re-reading the frames it
 already measured.
@@ -129,30 +126,35 @@ are rather than as a frame with no stars, when nothing is reassigned without
 being asked, and when a frame the tool is unsure about is reported as unsure
 rather than guessed at.
 
-### An honest remaining time on both long steps, and no talking around it
+### An honest remaining time on the stacking step too
 
-Neither the quality step nor the stacking step says how long it has left. Both
-show a bar and a frame count, and under it a sentence explaining that this takes
-minutes — `measureSlow` and `stackSlow` in `i18n.svelte.ts`. Those sentences
-exist only because there is no number; a number replaces them, and they should
-go with it rather than sit beside it.
+The quality step now says how long it has left; the stacking step still shows a
+bar, a frame count and `stackSlow` in `i18n.svelte.ts` — a sentence that exists
+only because there is no number, and that goes when one arrives.
 
-Quality is the easy half: one stage, a steady per-frame rate after the first
-handful, so time remaining follows from frames remaining.
+The estimator is `remaining.ts`, and what it does is worth knowing before
+extending it: it times the **current stage only** and names that stage beside
+the figure. This entry used to claim quality was the easy half because it had
+one stage. That was wrong twice over. It has two — the masters are built first —
+and a frame in them does not cost what a light costs: on one session a master
+frame ran several times slower than a light, because masters are held in memory
+all at once while lights are read on several threads. Any estimate that spends
+one stage's rate on another is confidently wrong, and a confident wrong figure
+is worse than none, because it is what someone decides on when they choose to
+wait or to walk away.
 
-Stacking is the real problem, and doing it the easy way would produce a
-confident wrong answer. The run is five stages of quite different cost — masters,
-measuring every light, aligning, depositing in one pass or two, writing — and
-the progress bar restarts within each. A remaining time has to be over the whole
-run, which means weighting the stages by what they actually cost rather than by
-their frame counts. Measuring and depositing are both dominated by decoding and
-are the two that matter; aligning and writing are rounding error next to them;
-rejection adds a second deposit pass, which the run already knows about because
-it reports the pass number.
+Stacking makes that harder rather than different. Its five stages — masters,
+measuring every light, aligning, depositing in one pass or two, writing — differ
+in cost the same way, and rejection adds a second deposit pass, which the run
+already knows about because it reports the pass number. Measuring and depositing
+are dominated by decoding and are the two that matter; aligning and writing are
+rounding error beside them. Whether those ratios are stable enough to carry one
+figure across the whole run is a question to settle by measuring a real run, not
+by reasoning.
 
-Done when both steps show a time that is stable rather than jumping about as a
-stage changes, when a run with rejection is not estimated as though it had one
-pass, and when the explanatory sentences are gone.
+Done when the stacking step shows a time that does not jump about, when a run
+with rejection is not estimated as though it had one pass, and when `stackSlow`
+is gone.
 
 ### A name, a logo and an icon
 
