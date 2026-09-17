@@ -375,7 +375,25 @@ struct Stopped {
     survey: astro_core::pipeline::Survey,
 }
 
-fn host() -> Result<PluginHost, String> {
+/// The plugins, loaded once and kept for the life of the window.
+///
+/// Once rather than per command. A fresh host per command meant the plugin
+/// libraries were mapped and unmapped again on every action, and unmapping one
+/// is what killed the process: the Canon plugin's decoder keeps a pool of
+/// worker threads parked inside its own library between frames, so the mapping
+/// has to outlive them, and there is no moment at which it is known to. Loading
+/// once removes the question rather than answering it — and saves re-reading
+/// the plugin folders every time a button is pressed.
+///
+/// The failure is remembered too. A window with no plugin cannot read a frame
+/// whichever command asks, and re-scanning the folders to fail again each time
+/// would only make the answer slower.
+fn host() -> Result<&'static PluginHost, String> {
+    static LOADED: std::sync::OnceLock<Result<PluginHost, String>> = std::sync::OnceLock::new();
+    LOADED.get_or_init(load_plugins).as_ref().map_err(|why| why.clone())
+}
+
+fn load_plugins() -> Result<PluginHost, String> {
     let mut host = PluginHost::new();
     let mut failures = Vec::new();
     for dir in default_plugin_dirs().into_iter().chain(development_dirs()) {
@@ -395,6 +413,9 @@ fn host() -> Result<PluginHost, String> {
         }
         return Err(message);
     }
+    for plugin in host.plugins() {
+        log::info!("plugin {} reads {}", plugin.id(), plugin.description().extensions.join(", "));
+    }
     Ok(host)
 }
 
@@ -410,7 +431,7 @@ fn read_session(roots: Roots) -> Result<SessionDto, String> {
     }
     let host = host()?;
     let options = ScanOptions { rules, ..Default::default() };
-    let report = astro_core::session::scan(&host, &options).map_err(|error| format!("{error:#}"))?;
+    let report = astro_core::session::scan(host, &options).map_err(|error| format!("{error:#}"))?;
     let partition = report.session.partition(&Tolerances::default());
     Ok(describe(&report, &partition))
 }
@@ -486,7 +507,7 @@ async fn measure(
 
     let host = host()?;
     let options = ScanOptions { rules, ..Default::default() };
-    let report = astro_core::session::scan(&host, &options).map_err(|error| format!("{error:#}"))?;
+    let report = astro_core::session::scan(host, &options).map_err(|error| format!("{error:#}"))?;
     let partition = report.session.partition(&Tolerances::default());
     let session = &report.session;
 
@@ -519,7 +540,7 @@ async fn measure(
             if stopped() { Flow::Stop } else { Flow::Continue }
         };
         match astro_core::pipeline::masters(
-            &host,
+            host,
             session,
             &partition,
             plan,
@@ -543,7 +564,7 @@ async fn measure(
     // counts from one reads as a second run of something smaller.
     let behind = ids.len() - left.len();
     let detect = DetectOptions { detect_sigma: sigma, max_stars, ..Default::default() };
-    let mut survey = astro_core::pipeline::survey(&host, session, &left, &masters, &detect, &|step| {
+    let mut survey = astro_core::pipeline::survey(host, session, &left, &masters, &detect, &|step| {
         if let Step::FrameRead { done, total, name } = step {
             let _ = on.send(Progress::Frame {
                 done: behind + done,
@@ -773,7 +794,7 @@ async fn stack(
 
     let host = host()?;
     let options = ScanOptions { rules, ..Default::default() };
-    let report = astro_core::session::scan(&host, &options).map_err(|e| format!("{e:#}"))?;
+    let report = astro_core::session::scan(host, &options).map_err(|e| format!("{e:#}"))?;
     let partition = report.session.partition(&Tolerances::default());
     let session = &report.session;
 
@@ -795,7 +816,7 @@ async fn stack(
             if stopped() { Flow::Stop } else { Flow::Continue }
         };
         match astro_core::pipeline::masters(
-            &host,
+            host,
             session,
             &partition,
             plan,
@@ -812,7 +833,7 @@ async fn stack(
     let ids: Vec<FrameId> =
         lights.members.iter().copied().filter(|id| session[*id].is_active()).collect();
     let detect = DetectOptions { detect_sigma: sigma, max_stars, ..Default::default() };
-    let survey = astro_core::pipeline::survey(&host, session, &ids, &masters, &detect, &|step| {
+    let survey = astro_core::pipeline::survey(host, session, &ids, &masters, &detect, &|step| {
         if let Step::FrameRead { done, total, name } = step {
             let _ = on.send(Progress::Frame { done, total, name: name.to_owned() });
         }
@@ -840,7 +861,7 @@ async fn stack(
         return Err("every frame was refused, so there is nothing to stack".to_owned());
     }
 
-    let stacked = match combine(&host, &selection, &masters, &stack_options, &|step| {
+    let stacked = match combine(host, &selection, &masters, &stack_options, &|step| {
         if let Step::Stacking { pass, passes, done, total, name } = step {
             let _ = on.send(Progress::Stacking {
                 pass,
@@ -1271,6 +1292,12 @@ pub fn run() {
             log::info!("astro-stacker {} starting", env!("CARGO_PKG_VERSION"));
             if let Ok(dir) = app.path().app_log_dir() {
                 log::info!("log in {}", dir.display());
+                journal::opened(&dir);
+            }
+            // Loaded here rather than on the first command, so the log names the
+            // plugins before anything can go wrong inside one.
+            if let Err(why) = host() {
+                log::error!("{why}");
             }
             Ok(())
         })
@@ -1284,8 +1311,15 @@ pub fn run() {
             app_version,
             formats
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running astro-stacker");
+        .build(tauri::generate_context!())
+        .expect("error while running astro-stacker")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event
+                && let Ok(dir) = app.path().app_log_dir()
+            {
+                journal::closed(&dir);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1366,7 +1400,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let report = astro_core::session::scan(&host, &options).expect("the session scans");
+        let report = astro_core::session::scan(host, &options).expect("the session scans");
         let partition = report.session.partition(&Tolerances::default());
         let session = &report.session;
 
@@ -1384,7 +1418,7 @@ mod tests {
             .collect();
 
         let masters = astro_core::pipeline::masters(
-            &host,
+            host,
             session,
             &partition,
             plan,
@@ -1394,7 +1428,7 @@ mod tests {
         )
         .expect("the masters build");
         let survey = astro_core::pipeline::survey(
-            &host,
+            host,
             session,
             &ids,
             &masters,
@@ -1456,7 +1490,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let report = astro_core::session::scan(&host, &options).expect("the session scans");
+        let report = astro_core::session::scan(host, &options).expect("the session scans");
         let partition = report.session.partition(&Tolerances::default());
         let session = &report.session;
         let (plan, _) = partition.plans_by_depth(session)[0];
@@ -1471,7 +1505,7 @@ mod tests {
             .take(6)
             .collect();
         let masters = astro_core::pipeline::masters(
-            &host,
+            host,
             session,
             &partition,
             plan,
@@ -1481,7 +1515,7 @@ mod tests {
         )
         .expect("the masters build");
         let survey = astro_core::pipeline::survey(
-            &host,
+            host,
             session,
             &ids,
             &masters,
@@ -1494,7 +1528,7 @@ mod tests {
                 .expect("six frames align");
         let options = StackOptions::default();
         let selection = select(&alignment, &options);
-        let stacked = combine(&host, &selection, &masters, &options, &|_| Flow::Continue)
+        let stacked = combine(host, &selection, &masters, &options, &|_| Flow::Continue)
             .expect("they combine");
 
         assert_eq!(stacked.frames, 6);
@@ -1570,7 +1604,7 @@ mod tests {
             rules: vec![RoleRule::new(root.join("lights"), Some(FrameKind::Light))],
             ..Default::default()
         };
-        let report = astro_core::session::scan(&host, &options).expect("the session scans");
+        let report = astro_core::session::scan(host, &options).expect("the session scans");
         let partition = report.session.partition(&Tolerances::default());
         let session = &report.session;
         let (plan, _) = partition.plans_by_depth(session)[0];
@@ -1587,7 +1621,7 @@ mod tests {
         let detect = DetectOptions::default();
         let read = |ids: &[FrameId], stop_after: usize| {
             let seen = std::sync::atomic::AtomicUsize::new(0);
-            astro_core::pipeline::survey(&host, session, ids, &masters, &detect, &|step| {
+            astro_core::pipeline::survey(host, session, ids, &masters, &detect, &|step| {
                 if let Step::FrameRead { .. } = step {
                     seen.fetch_add(1, Ordering::Relaxed);
                 }

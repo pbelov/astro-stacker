@@ -14,6 +14,8 @@ use astro_plugin_abi::abi::{
     LogLevel, PROBE_CERTAIN, PROBE_HEADER_BYTES, PluginInfo, PluginVTable, SampleFormat, Status,
 };
 use astro_plugin_abi::safe::{FrameInfo, PluginDescription};
+use std::mem::ManuallyDrop;
+
 use libloading::{Library, Symbol};
 
 use crate::error::{Error, Result};
@@ -56,13 +58,29 @@ static HOST_VTABLE: HostVTable = HostVTable {
 // A loaded plugin
 // ---------------------------------------------------------------------------
 
-/// One loaded plugin library, kept alive for as long as any frame it opened.
+/// One loaded plugin library, kept alive for as long as the process runs.
 pub struct LoadedPlugin {
     description: PluginDescription,
     path: PathBuf,
     vtable: *const PluginVTable,
-    /// Declared last so it unloads only after everything that points into it.
-    library: Library,
+    /// Never unloaded, deliberately.
+    ///
+    /// A plugin is a whole program's worth of code: it may start threads, and
+    /// this project's own Canon plugin does — its decoder brings a work-stealing
+    /// pool with it, whose workers park inside the library between frames.
+    /// Unmapping the library under a parked thread leaves it to wake up in
+    /// memory that is no longer there, which is not an error anything can catch:
+    /// the process is simply gone, with the fault reported against a module that
+    /// by then does not exist.
+    ///
+    /// Nothing in the ABI can make this safe, because nothing in it can ask
+    /// whether a plugin left anything running, and a plugin has no obligation to
+    /// say. Holding one mapping per format for the life of the process is the
+    /// whole of the cost, and it buys the one guarantee that matters: an address
+    /// inside a plugin stays an address inside that plugin.
+    /// Held and never read: the mapping is the point, not the handle.
+    #[expect(dead_code, reason = "keeps the library mapped for the life of the process")]
+    library: ManuallyDrop<Library>,
 }
 
 // SAFETY: `vtable` points at immutable data inside `library`, and the ABI
@@ -108,7 +126,7 @@ impl LoadedPlugin {
         let description = unsafe { read_description(table) }
             .ok_or_else(|| Error::MalformedPlugin { path: path.to_owned() })?;
 
-        Ok(Self { description, path: path.to_owned(), vtable, library })
+        Ok(Self { description, path: path.to_owned(), vtable, library: ManuallyDrop::new(library) })
     }
 
     pub fn description(&self) -> &PluginDescription {
@@ -132,10 +150,12 @@ impl LoadedPlugin {
 impl Drop for LoadedPlugin {
     fn drop(&mut self) {
         // SAFETY: every `OpenFrame` holds an `Arc` to its plugin, so all
-        // handles are closed by the time this runs. `library` is dropped after
-        // this, since it is the last declared field.
+        // handles are closed by the time this runs.
+        //
+        // The plugin is told it is done and the library stays mapped: see the
+        // field. `shutdown` is the plugin's chance to release what it holds,
+        // which is the part it can actually promise to do.
         unsafe { (self.vtable().shutdown)() };
-        let _ = &self.library;
     }
 }
 

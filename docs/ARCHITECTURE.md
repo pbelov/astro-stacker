@@ -31,6 +31,16 @@ The consequences are deliberate:
 * Panics must not unwind across the boundary. `export_plugin!` contains them.
 * `ABI_VERSION` is checked in both directions at load. There is no forward
   compatibility: a mismatch refuses to load rather than guessing.
+* **Once loaded, a plugin is never unloaded.** A plugin is a whole program's
+  worth of code and may start threads; this project's own Canon plugin does,
+  because its decoder brings a work-stealing pool that parks inside the library
+  between frames. Unmapping a library under a parked thread leaves it to wake in
+  memory that is gone, and that is not an error anything can catch — the process
+  ends, and the fault is reported against a module that by then does not exist.
+  Nothing in the ABI can make unloading safe, because nothing in it can ask
+  whether a plugin left something running, and a plugin has no way to promise it
+  did not. One mapping per format for the life of the process is the whole of
+  the cost.
 
 Layout sizes are asserted in `astro-plugin-abi`'s tests so that changing a
 struct fails the build rather than silently breaking installed plugins.

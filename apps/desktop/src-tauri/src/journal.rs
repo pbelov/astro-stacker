@@ -64,6 +64,38 @@ pub fn plugin<R: Runtime>() -> TauriPlugin<R> {
         .build()
 }
 
+/// Says whether the run before this one ended on purpose, and marks this one
+/// as running.
+///
+/// An end with no hook - an access violation, a stack overflow, a process
+/// killed - leaves a log that stops mid-sentence, and a log that stops
+/// mid-sentence looks exactly like one whose writer had nothing more to say.
+/// Telling the two apart is the difference between "the log says nothing" and
+/// "the log says it was killed", and only the second sends anyone looking in
+/// the right place. Windows keeps that place: Event Viewer, Windows Logs ->
+/// Application, where an Application Error entry names the faulting module and
+/// the exception code.
+///
+/// A marker file rather than the previous log, because the question is one bit
+/// and reading a log to answer it means parsing a log.
+pub fn opened(dir: &std::path::Path) {
+    let marker = dir.join(format!("{STEM}.running"));
+    if marker.exists() {
+        log::warn!("the run before this one ended without closing");
+        log::warn!(
+            "if it vanished rather than being closed, Windows recorded it: Event Viewer, \
+Windows Logs, Application - the entry beside that time names the module and the code"
+        );
+    }
+    let _ = std::fs::write(&marker, "running");
+}
+
+/// Marks this run as ended on purpose. Whatever is not marked, crashed.
+pub fn closed(dir: &std::path::Path) {
+    log::info!("closing");
+    let _ = std::fs::remove_file(dir.join(format!("{STEM}.running")));
+}
+
 /// Sends a panic to the log before the stack goes.
 ///
 /// Chained rather than replacing: the hook already installed is what prints a
