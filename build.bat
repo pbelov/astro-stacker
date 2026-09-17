@@ -16,8 +16,14 @@ rem В папку кладутся обе программы: командная
 rem общие - и то, и другое ищет их одинаково, сначала в подпапке plugins рядом
 rem с собой, потом рядом с собой, - поэтому одна папка plugins обслуживает оба.
 rem
-rem   build.bat         полная сборка: тесты, clippy, релиз, архив
-rem   build.bat quick   только релиз и архив, без проверок
+rem   build.bat         полная сборка: тесты, clippy, релиз, zip, копия в архив
+rem   build.bat quick   то же самое без тестов и clippy
+rem
+rem Каждая собранная версия остаётся в build\archive целиком и запускается
+rem прямо оттуда. Это нужно, чтобы регрессию не вспоминать, а открыть: взять
+rem сборку, где её ещё не было, и сравнить на одних и тех же кадрах. Версия
+rem стоит в имени папки, а рядом build.txt с коммитом - без него по одному
+rem номеру версии не сказать, что именно в ней собрано.
 rem
 rem Кодовая страница консоли переключается на UTF-8 и возвращается как была,
 rem чем бы сборка ни кончилась: иначе скрипт, запущенный из открытого
@@ -76,8 +82,9 @@ echo === Сборка astro-stacker %VER% ===
 echo.
 
 rem Старые сборки убираются по имени, а не сносом всей папки build: туда мог
-rem положить что-то и человек. Убирается заранее, иначе в папке остались бы
-rem файлы прошлой версии, а архив собрался бы поверх них и увёз бы их с собой.
+rem положить что-то и человек, и там же лежит archive, который сносить нельзя.
+rem Убирается заранее, иначе в папке остались бы файлы прошлой версии, а zip
+rem собрался бы поверх них и увёз бы их с собой.
 if not exist "%OUT%" mkdir "%OUT%"
 for /d %%d in ("%OUT%\astro-stacker_*_x64") do rd /s /q "%%~d"
 del /f /q "%OUT%\astro-stacker_*_x64.zip" >nul 2>&1
@@ -221,6 +228,49 @@ if not "%ERRORLEVEL%"=="0" (
 )
 echo   плагин Canon загружается
 
+echo.
+echo --- В архив ---
+rem Копия кладётся после проверки, а не до: в архиве не должно оказаться
+rem сборки, про которую уже известно, что она сломана.
+set "ARCHIVE=%OUT%\archive\%NAME%"
+if not exist "%OUT%\archive" mkdir "%OUT%\archive"
+rem Пересборка той же версии заменяет свою копию: это та же версия, и две её
+rem штуки различить всё равно нечем.
+if exist "%ARCHIVE%" rd /s /q "%ARCHIVE%"
+xcopy "%STAGE%" "%ARCHIVE%\" /e /i /q /y >nul
+if not "%ERRORLEVEL%"=="0" (
+  echo [ОШИБКА] не удалось скопировать сборку в архив
+  exit /b 1
+)
+
+rem Коммит, а не только версия: версия говорит, какая это сборка, коммит -
+rem из чего она собрана. Незакоммиченное дерево помечается, иначе сборка из
+rem правок, которых нет в истории, выглядела бы как сборка коммита.
+set "COMMIT=вне git"
+for /f "delims=" %%h in ('git rev-parse --short HEAD 2^>nul') do set "COMMIT=%%h"
+set "DIRTY="
+for /f "delims=" %%s in ('git status --porcelain 2^>nul') do set "DIRTY=1"
+if defined DIRTY set "COMMIT=!COMMIT! + незакоммиченные правки"
+> "%ARCHIVE%\build.txt" (
+  echo astro-stacker %VER%
+  echo коммит:  !COMMIT!
+  echo собрано: %DATE% %TIME:~0,5%
+)
+
+rem Размер считается и печатается, чтобы растущий архив не стал открытием:
+rem около двадцати мегабайт на версию, и никто их не подчищает.
+rem
+rem Черта внутри команды PowerShell не экранируется: в for /f тело в одинарных
+rem кавычках уходит дальше как есть, вместе с кареткой, и PowerShell перестаёт
+rem видеть в "^|" конвейер - считает всё после него отдельными аргументами и
+rem ищет папку рядом с каждой папкой репозитория. Разбирать такую черту незачем,
+rem она и так внутри двойных кавычек аргумента.
+set "KEPT=?"
+set "TOTALMB=?"
+for /f "delims=" %%n in ('powershell -NoProfile -Command "(Get-ChildItem -Directory '%OUT%\archive').Count"') do set "KEPT=%%n"
+for /f "delims=" %%m in ('powershell -NoProfile -Command "[int]((Get-ChildItem -Recurse -File '%OUT%\archive' | Measure-Object Length -Sum).Sum/1MB)"') do set "TOTALMB=%%m"
+echo   версий в архиве: !KEPT!, занято !TOTALMB! МБ
+
 rem tar есть в Windows 10 и новее и умеет zip. PowerShell - запасной путь.
 rem -C нужен, чтобы внутри архива лежала сама папка, а не build\папка.
 where tar >nul 2>&1
@@ -241,6 +291,7 @@ for %%f in ("%ZIP%") do (
   echo   %%~f  ^(!KB! КБ, %%~tf^)
 )
 echo   %STAGE%\  - распакованная папка, запускается прямо из неё
+echo   %OUT%\archive\  - все собранные версии, каждая запускается оттуда же
 echo.
 echo   astro-stacker.exe --help          список команд
 echo   astro-stacker.exe plugins         какие форматы читаются
