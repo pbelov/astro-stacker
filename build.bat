@@ -19,8 +19,11 @@ rem
 rem   build.bat         полная сборка: тесты, clippy, релиз, zip, копия в архив
 rem   build.bat quick   то же самое без тестов и clippy
 rem
-rem Каждая собранная версия остаётся в build\archive целиком и запускается
-rem прямо оттуда. Это нужно, чтобы регрессию не вспоминать, а открыть: взять
+rem Каждая собранная версия остаётся в archive целиком и запускается прямо
+rem оттуда. Папка в корне, а не внутри build: build вычищается при каждом
+rem запуске, и архив, лежащий внутри вычищаемого, рано или поздно вычистят.
+rem
+rem Нужно это, чтобы регрессию не вспоминать, а открыть: взять
 rem сборку, где её ещё не было, и сравнить на одних и тех же кадрах. Версия
 rem стоит в имени папки, а рядом build.txt с коммитом - без него по одному
 rem номеру версии не сказать, что именно в ней собрано.
@@ -82,9 +85,9 @@ echo === Сборка astro-stacker %VER% ===
 echo.
 
 rem Старые сборки убираются по имени, а не сносом всей папки build: туда мог
-rem положить что-то и человек, и там же лежит archive, который сносить нельзя.
-rem Убирается заранее, иначе в папке остались бы файлы прошлой версии, а zip
-rem собрался бы поверх них и увёз бы их с собой.
+rem положить что-то и человек. Папка archive лежит отдельно, в корне, и этой
+rem уборки не касается. Убирается заранее, иначе остались бы файлы прошлой
+rem версии, а zip собрался бы поверх них и увёз бы их с собой.
 if not exist "%OUT%" mkdir "%OUT%"
 for /d %%d in ("%OUT%\astro-stacker_*_x64") do rd /s /q "%%~d"
 del /f /q "%OUT%\astro-stacker_*_x64.zip" >nul 2>&1
@@ -232,8 +235,8 @@ echo.
 echo --- В архив ---
 rem Копия кладётся после проверки, а не до: в архиве не должно оказаться
 rem сборки, про которую уже известно, что она сломана.
-set "ARCHIVE=%OUT%\archive\%NAME%"
-if not exist "%OUT%\archive" mkdir "%OUT%\archive"
+set "ARCHIVE=archive\%NAME%"
+if not exist "archive" mkdir "archive"
 rem Пересборка той же версии заменяет свою копию: это та же версия, и две её
 rem штуки различить всё равно нечем.
 if exist "%ARCHIVE%" rd /s /q "%ARCHIVE%"
@@ -267,8 +270,8 @@ rem ищет папку рядом с каждой папкой репозито
 rem она и так внутри двойных кавычек аргумента.
 set "KEPT=?"
 set "TOTALMB=?"
-for /f "delims=" %%n in ('powershell -NoProfile -Command "(Get-ChildItem -Directory '%OUT%\archive').Count"') do set "KEPT=%%n"
-for /f "delims=" %%m in ('powershell -NoProfile -Command "[int]((Get-ChildItem -Recurse -File '%OUT%\archive' | Measure-Object Length -Sum).Sum/1MB)"') do set "TOTALMB=%%m"
+for /f "delims=" %%n in ('powershell -NoProfile -Command "(Get-ChildItem -Directory 'archive').Count"') do set "KEPT=%%n"
+for /f "delims=" %%m in ('powershell -NoProfile -Command "[int]((Get-ChildItem -Recurse -File 'archive' | Measure-Object Length -Sum).Sum/1MB)"') do set "TOTALMB=%%m"
 echo   версий в архиве: !KEPT!, занято !TOTALMB! МБ
 
 rem tar есть в Windows 10 и новее и умеет zip. PowerShell - запасной путь.
@@ -291,7 +294,7 @@ for %%f in ("%ZIP%") do (
   echo   %%~f  ^(!KB! КБ, %%~tf^)
 )
 echo   %STAGE%\  - распакованная папка, запускается прямо из неё
-echo   %OUT%\archive\  - все собранные версии, каждая запускается оттуда же
+echo   archive\  - все собранные версии, каждая запускается оттуда же
 echo.
 echo   astro-stacker.exe --help          список команд
 echo   astro-stacker.exe plugins         какие форматы читаются

@@ -17,6 +17,10 @@ dist/
 # Release staging from build.bat
 /build
 
+# Every built version, kept so an old one can be run beside a new one.
+# Twenty megabytes a build, and binaries have no business in the history.
+/archive
+
 # Desktop shell
 /apps/desktop/node_modules
 /apps/desktop/dist
