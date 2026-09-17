@@ -9,6 +9,7 @@
   import { invoke, Channel } from "@tauri-apps/api/core";
   import { save } from "@tauri-apps/plugin-dialog";
   import { i18n, type Keys } from "./i18n.svelte";
+  import { folderOf } from "./places";
 
   type Coverage = { filled: number; medianDepth: number; thinnest: number };
   type StackedFrame = {
@@ -92,12 +93,6 @@
    */
   const short = (path: string, keep = 46) =>
     path.length <= keep ? path : "…" + path.slice(path.length - keep + 1);
-
-  /** Путь без последнего сегмента. Разделитель тут может быть любой из двух. */
-  const folderOf = (path: string) => {
-    const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-    return at > 0 ? path.slice(0, at) : "";
-  };
 
   /** Папка, в которой разумно открыть диалог: где уже что-то выбрано, иначе где лайты. */
   const startingFolder = $derived.by(() => {

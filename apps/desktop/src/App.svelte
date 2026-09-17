@@ -9,6 +9,7 @@
   import Quality from "./Quality.svelte";
   import Stack from "./Stack.svelte";
   import { i18n, LOCALES, type Keys, type Locale } from "./i18n.svelte";
+  import { folderOf, remember, startFilePick, startFolderPick } from "./places";
 
   type Step = "frames" | "quality" | "stack";
   const STEPS: { id: Step; key: "stepFrames" | "stepQuality" | "stepStack"; ready: boolean }[] = [
@@ -172,9 +173,17 @@
   }
 
   async function browse(role: Role) {
-    const picked = await open({ directory: true, multiple: true });
+    const picked = await open({
+      directory: true,
+      multiple: true,
+      defaultPath: startFolderPick(role),
+    });
     if (!picked) return;
-    add(role, Array.isArray(picked) ? picked : [picked]);
+    const paths = Array.isArray(picked) ? picked : [picked];
+    // Запоминается последняя из выбранных: если взяли несколько, ближе к делу
+    // та, до которой дошли, а не та, с которой начали.
+    remember(role, paths[paths.length - 1]);
+    add(role, paths);
   }
 
   // Поштучно, для кадров, которые не лежат одной папкой: часть серии, кадр из
@@ -183,9 +192,11 @@
   async function browseFiles(role: Role) {
     const filters =
       formats.length > 0 ? [{ name: i18n.t("framesFilter"), extensions: formats }] : undefined;
-    const picked = await open({ multiple: true, filters });
+    const picked = await open({ multiple: true, filters, defaultPath: startFilePick(role) });
     if (!picked) return;
-    add(role, Array.isArray(picked) ? picked : [picked]);
+    const paths = Array.isArray(picked) ? picked : [picked];
+    remember(role, folderOf(paths[paths.length - 1]));
+    add(role, paths);
   }
 
   async function scan() {
