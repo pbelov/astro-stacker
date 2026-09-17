@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.22.4"
+version = "0.22.5"
 edition = "2024"
 # The host's floor, and only the host's. It is free to follow what `astro-core`
 # depends on, because the crate a plugin author builds against declares its own
@@ -26,7 +26,12 @@ clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 libloading = "0.9"
 log = "0.4"
-rawler = "0.7"
+# Pinned exactly, not floated. rawler does not follow SemVer - a patch
+# release can change what a decode returns - and a decoder that changes
+# under a `cargo update` would change every measurement in this project
+# without a commit saying so. Raising it is a deliberate act with frames
+# re-read on both sides.
+rawler = "=0.7.2"
 rayon = "1"
 # Only the `system` half: this is asked two questions, how much memory is free
 # and how many cores are physical, and neither wants processes or disks.
