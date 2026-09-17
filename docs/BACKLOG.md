@@ -112,17 +112,11 @@ allowed to overreach into: the residual pairs that pixels still cannot split are
 a dark against a light of an empty field, and a flat against a light of the
 twilight sky.
 
-**What "refile" means has to be settled first**, because the two readings are
-very different amounts of work and risk:
-
-* reassigning the frame's role inside the session, so it is used as a dark in
-  this run and nothing on disk moves, or
-* moving the file into the darks folder.
-
-The first is the one to build unless the owner says otherwise. Roles are carried
-by `RoleRule`, which is per path rather than per frame, so how a single frame
-takes a different role than the folder it sits in is the open design question —
-the window can now be given individual files, which is most of the way there.
+Refiling is a change of role inside the session and nothing more: no file on
+disk moves, then or ever — see ARCHITECTURE.md. Roles are carried by `RoleRule`,
+which is per path rather than per frame, so how a single frame takes a role
+different from the folder it sits in is the open design question; the window can
+now be given individual files, which is most of the way there.
 
 The reverse direction is the damaging one and is not covered by this entry: a
 light among the darks poisons the master and subtracts a star field from every

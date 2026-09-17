@@ -80,6 +80,26 @@ exposure, ISO and body as its lights — that is what makes it valid — so thos
 are precisely the fields that cannot separate them. FITS capture software writes
 an `IMAGETYP` keyword; CR2 and CR3 have no equivalent.
 
+### The user's files are read, never written
+
+Frames are opened and read. Nothing in this program moves, renames or deletes a
+file the user put there, and no future feature may: the only things it writes
+are results it was asked to produce, at paths it was given, and — when that
+exists — a saved session of its own.
+
+The rule is absolute rather than a default because the alternative cannot be
+made safe by care. A stacker reads a night the user cannot re-shoot, often the
+only copy, often mid-import; a wrong path, a mis-detected kind or a crash
+between the two halves of a move destroys something with no backup. And the
+value of moving a file is small next to that: a frame filed in the wrong folder
+needs its role changed for this run, which is a fact about the session and not
+about the disk.
+
+So a finding about a misfiled frame proposes a role, never a relocation. This is
+the same asymmetry as the rule above: the program may say what a frame looks
+like and may refuse to use it, and what to do about the folder it sits in is the
+user's business, in their own file manager.
+
 ### Two types for incompatibility, not two severities
 
 `Incompatibility` is a refusal; `Mismatch` is a report. They are separate types
