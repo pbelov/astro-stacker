@@ -177,9 +177,44 @@ is gone.
 `astro-stacker` is a working title that describes the category rather than the
 program. The window, the installer and the taskbar all show a default icon.
 
-This is a decision to make rather than a task to execute, and it is written down
-here so it is made deliberately and once, before a name spreads into the crate
-names, the repository, the release artefacts and anything published.
+Agreed to be worth settling deliberately, and worth settling **before** the next
+entry, because a project file wants an extension and an extension wants a name.
+`.as` will do until then.
+
+A decision rather than a task, and made once: a name spreads into the crate
+names, the repository, the release artefacts, the window title, the file
+extension and anything published. The sibling project is the shape of what
+"done" looks like — a name, an icon shown in the About box and the taskbar, and
+a site.
+
+### Saving a project, and opening it again
+
+A session is a list of frames with roles, the thresholds that were set, and what
+came out. None of it survives closing the window: the next run starts from an
+empty pair of panes, and a night that took an evening to arrange is arranged
+again. The sibling star-trails project has this, so the shape is decided rather
+than invented — `.as` for the extension for now, JSON inside, and a pair of
+narrow commands rather than opening the filesystem to the window at large.
+
+Read that project's ARCHITECTURE.md §8.4 before starting. Four things there were
+learned the expensive way and are cheaper to copy than to rediscover:
+
+* **Autosave does not write the open file.** It went straight into the project
+  file once, which made the unsaved-changes marker go out after 800 ms and mean
+  nothing. Autosave belongs in an invisible draft beside the application's own
+  data; the file is written when the user says to.
+* **An empty project is never written anywhere.** That is what stops a stray
+  clear from overwriting a real file with nothing.
+* **The recent list lives beside the application's data, not in the browser's
+  storage.** A list of sessions would not survive the webview clearing its
+  storage, and a thumbnail has no business in it.
+* **The window title wants a narrow command, not a permission.** Letting the
+  page set the title at will is a wider door than putting the name in a title
+  the shell assembles.
+
+Done when a session can be saved, reopened and continued — frames, roles and
+thresholds — when nothing of the user's is written anywhere but the file they
+named and the program's own data, and when closing with unsaved work says so.
 
 ## The result
 

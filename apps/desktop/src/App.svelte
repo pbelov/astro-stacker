@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { open, save } from "@tauri-apps/plugin-dialog";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import { onDestroy, onMount } from "svelte";
 
@@ -98,6 +98,8 @@
   let version = $state("");
   let formats = $state<string[]>([]);
   let logPath = $state("");
+  /** Текст уведомления о сторонних компонентах, пока его не попросили — null. */
+  let notices = $state<string | null>(null);
 
   let roots = $state<Record<Role, string[]>>({
     lights: [],
@@ -172,6 +174,29 @@
     session = null;
   }
 
+  /**
+   * Список сторонних компонентов и тексты их лицензий.
+   *
+   * Вшит в бинарник, а не лежит файлом рядом: условие лицензии декодера
+   * говорит про то, что получает человек вместе с программой, а файл рядом
+   * можно удалить и не заметить.
+   */
+  async function showNotices() {
+    notices = await invoke<string>("third_party_notices").catch((thrown) => String(thrown));
+  }
+
+  /** Сохранить его отдельным файлом — чтобы можно было прочитать не в окне. */
+  async function saveNotices() {
+    if (notices === null) return;
+    const picked = await save({
+      defaultPath: "THIRD-PARTY-NOTICES.md",
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    // Пишет бэкенд: текст и так у него, а просить право писать файлы ради
+    // одного этого — больше прав, чем нужно.
+    if (typeof picked === "string") await invoke("write_notices", { path: picked });
+  }
+
   async function browse(role: Role) {
     const picked = await open({
       directory: true,
@@ -187,8 +212,8 @@
   }
 
   // Поштучно, для кадров, которые не лежат одной папкой: часть серии, кадр из
-  // отложенной подпапки. Фильтр — то, что читают загруженные плагины, а не
-  // список, вшитый в окно: форматы здесь приходят плагинами.
+  // отложенной подпапки. Фильтр — то, что читает собранная программа, а не
+  // список, вшитый в окно: спрашивается у ядра.
   async function browseFiles(role: Role) {
     const filters =
       formats.length > 0 ? [{ name: i18n.t("framesFilter"), extensions: formats }] : undefined;
@@ -555,7 +580,39 @@
           </button>
         </p>
       {/if}
+      <!-- Само приложение под двойной лицензией, а сторонние компоненты — в
+           тексте, вшитом в бинарник. Среди них rawler под LGPL-2.1, и её
+           условие «приложить копию лицензии» закрывается именно этим. -->
+      <p class="muted log">
+        <span>{i18n.t("aboutLicense")}</span>
+        <button class="ghost" onclick={() => void showNotices()}>{i18n.t("aboutNotices")}</button>
+      </p>
       <button class="primary" onclick={() => (aboutOpen = false)}>{i18n.t("close")}</button>
+    </div>
+  </div>
+{/if}
+
+{#if notices !== null}
+  <div
+    class="scrim"
+    role="button"
+    tabindex="0"
+    onclick={() => (notices = null)}
+    onkeydown={(e) => e.key === "Escape" && (notices = null)}
+  >
+    <div
+      class="modal notices"
+      role="dialog"
+      tabindex="-1"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={() => {}}
+    >
+      <h2>{i18n.t("aboutNotices")}</h2>
+      <pre class="noticestext">{notices}</pre>
+      <div class="noticesactions">
+        <button class="ghost" onclick={() => void saveNotices()}>{i18n.t("saveAs")}</button>
+        <button class="primary" onclick={() => (notices = null)}>{i18n.t("close")}</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -713,6 +770,36 @@
     align-self: baseline;
     margin-top: 0;
     flex: none;
+  }
+  /* Список компонентов длинный по существу: сотни пакетов и тексты лицензий.
+     Окно под него шире и выше обычного, а прокручивается сам текст. */
+  .modal.notices {
+    max-width: min(860px, 90vw);
+    max-height: 84vh;
+  }
+  .noticestext {
+    margin: 0;
+    overflow: auto;
+    flex: 1;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--muted);
+    background: var(--raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+  }
+  .noticesactions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 10px;
+  }
+  .noticesactions button {
+    align-self: auto;
+    margin-top: 0;
   }
   .modal button {
     align-self: flex-end;

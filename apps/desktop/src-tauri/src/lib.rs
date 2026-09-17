@@ -992,6 +992,29 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_owned()
 }
 
+/// Every third-party component in this build, with the licence texts.
+///
+/// Compiled in rather than read from beside the binary. Whoever has the
+/// program has the notice, which is what the condition on the raw decoder's
+/// licence actually asks for — a file that can be deleted from the folder is
+/// not a notice, it is a file that happened to be there.
+const THIRD_PARTY_NOTICES: &str = include_str!("../../../../THIRD-PARTY-NOTICES.md");
+
+#[tauri::command]
+fn third_party_notices() -> &'static str {
+    THIRD_PARTY_NOTICES
+}
+
+/// Writes the notices where the user asked for them.
+///
+/// A command rather than the filesystem plugin: the text is already here, and
+/// asking the window for permission to write files at large would be a wider
+/// door than this needs.
+#[tauri::command]
+fn write_notices(path: String) -> Result<(), String> {
+    std::fs::write(&path, THIRD_PARTY_NOTICES).map_err(|why| format!("{path}: {why}"))
+}
+
 #[tauri::command]
 fn formats() -> Vec<String> {
     host().map(|host| host.supported_extensions()).unwrap_or_default()
@@ -1269,6 +1292,8 @@ pub fn run() {
             cancel,
             log_file,
             app_version,
+            third_party_notices,
+            write_notices,
             formats
         ])
         .build(tauri::generate_context!())

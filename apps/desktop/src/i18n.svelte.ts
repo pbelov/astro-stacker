@@ -191,12 +191,15 @@ const ru = {
   language: "Язык",
   about: "О программе",
   aboutText:
-    "Складывает астрокадры: читает сессию, находит звёзды, измеряет смаз, регистрирует и складывает. Форматы кадров — подключаемые плагины.",
+    "Складывает астрокадры: читает сессию, находит звёзды, измеряет смаз, регистрирует и складывает.",
   close: "Закрыть",
   version: "Версия {v}",
   formatsRead: "Читаются: {list}",
   logKept: "Что происходило, пишется в файл — вместе с предыдущим запуском",
   showLog: "Показать",
+  aboutLicense: "Приложение — MIT или Apache-2.0.",
+  aboutNotices: "Сторонние компоненты",
+  saveAs: "Сохранить как…",
 
   error: "Ошибка",
   hours: "ч",
@@ -387,12 +390,15 @@ const en: Record<Keys, string> = {
   language: "Language",
   about: "About",
   aboutText:
-    "Stacks astrophotographs: reads a session, finds the stars, measures the trailing, registers and combines. Frame formats arrive as loadable plugins.",
+    "Stacks astrophotographs: reads a session, finds the stars, measures the trailing, registers and combines.",
   close: "Close",
   version: "Version {v}",
   formatsRead: "Reads: {list}",
   logKept: "What happened is written to a file, along with the run before it",
   showLog: "Show",
+  aboutLicense: "The app is MIT or Apache-2.0.",
+  aboutNotices: "Third-party components",
+  saveAs: "Save as…",
 
   error: "Error",
   hours: "h",

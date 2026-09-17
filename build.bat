@@ -200,7 +200,7 @@ if not "%ERRORLEVEL%"=="0" (
 rem README и лицензии едут вместе с бинарниками: в папке лежит LGPL-код
 rem (декодер равов), и требование о его упоминании относится к тому, что
 rem отдают, а не к тому, что лежит в репозитории.
-for %%f in ("README.md" "LICENSE-MIT" "LICENSE-APACHE" "THIRD-PARTY.md") do (
+for %%f in ("README.md" "LICENSE-MIT" "LICENSE-APACHE" "THIRD-PARTY-NOTICES.md") do (
   if not exist "%%~f" (
     echo [ОШИБКА] нет файла %%~f, а он должен ехать с релизом
     exit /b 1
