@@ -60,8 +60,10 @@
       : [],
   );
 
-  const measure = () => void measurement.start(roots, sigma, maxStars, raw);
+  const measure = (resume = false) =>
+    void measurement.start(roots, sigma, maxStars, raw, resume);
   const stop = () => measurement.stop();
+  const canContinue = $derived(measurement.canContinue(roots));
 
   // Оценка живёт здесь, а не в `measurement`: она считается из того, что уже
   // показано, и ничего не добавляет к прогону. Компонент могут уничтожить и
@@ -106,7 +108,12 @@
   {#if running}
     <button class="ghost" onclick={stop}>{i18n.t("stop")}</button>
   {:else}
-    <button class="primary" onclick={measure}>
+    {#if canContinue}
+      <button class="primary" onclick={() => measure(true)}>{i18n.t("measureOn")}</button>
+    {/if}
+    <!-- Начать заново остаётся рядом: продолжить можно только то же самое, а
+         перемерить всё - единственный путь к кадру, который не прочитался. -->
+    <button class:primary={!canContinue} class:ghost={canContinue} onclick={() => measure()}>
       {quality ? i18n.t("measureAgain") : i18n.t("measure")}
     </button>
   {/if}

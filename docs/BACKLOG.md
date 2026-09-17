@@ -72,16 +72,6 @@ worth stacking are a hand-picked subset is not an exception.
 Done when the five cards together take about half the height they do now, and
 when choosing files is not visibly the lesser of the two ways in.
 
-### A stopped measurement should be continuable
-
-A run stopped part way through is currently only a run thrown away. Stopping at
-a hundred frames to look, then continuing, is the natural way to use a step that
-takes minutes — and the pipeline already reports frames done out of total, so
-the state to resume from exists.
-
-Done when a stopped run can be continued without re-reading the frames it
-already measured.
-
 ### Name the frames that are not lights, and offer to refile them
 
 A dark or a flat filed among the lights survives the whole run today. The

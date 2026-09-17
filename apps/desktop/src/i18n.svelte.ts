@@ -90,6 +90,7 @@ const ru = {
   buildingMaster: "Мастер-{kind}: {done} из {total}",
   measuringFrame: "Кадр {done} из {total} — {name}",
   timeLeft: "осталось ~{n} {unit}",
+  measureOn: "Продолжить",
   stoppedEarly: "Остановлено: {n:измерен|измерено|измерено} {n} {n:кадр|кадра|кадров}, это часть прогона, а не весь он.",
 
   runAsWhole: "Прогон целиком",
@@ -283,6 +284,7 @@ const en: Record<Keys, string> = {
   buildingMaster: "Master {kind}: {done} of {total}",
   measuringFrame: "Frame {done} of {total} — {name}",
   timeLeft: "~{n} {unit} left",
+  measureOn: "Carry on",
   stoppedEarly: "Stopped: {n} {n:frame|frames} measured, which is part of a run and not the whole of one.",
 
   runAsWhole: "The run as a whole",

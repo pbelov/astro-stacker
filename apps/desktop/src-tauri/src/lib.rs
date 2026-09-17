@@ -278,6 +278,13 @@ pub struct QualityDto {
     /// True when the user stopped it: `frames` then holds part of a run and
     /// must not be read as the whole of one.
     pub stopped: bool,
+    /// Whether the rest of the run is still there to be measured.
+    ///
+    /// Not the same as `stopped`, and the window must offer to carry on from
+    /// this rather than from that: a pass finishes the frames already under
+    /// way, so a stop arriving near the end leaves a complete run that was
+    /// nonetheless stopped, and there is nothing to carry on with.
+    pub continuable: bool,
     /// Where the run as a whole is trailed, in degrees, and how consistently.
     ///
     /// Aggregated in the core as a spin-2 quantity. An ellipse at 179 degrees
@@ -346,6 +353,26 @@ pub struct Running {
     /// The last preview rendered, kept so the window can fetch its pixels as
     /// bytes rather than as a JSON array of numbers.
     preview: std::sync::Mutex<Vec<u8>>,
+    /// A measurement stopped part way through, kept so it can be continued.
+    held: std::sync::Mutex<Option<Stopped>>,
+}
+
+/// What a stopped measurement needs in order to carry on.
+///
+/// The masters are kept along with the frames, and that is the point rather
+/// than an optimisation: rebuilding them is most of the cost of a short
+/// continuation, and a continuation costing nearly as much as starting over is
+/// not one. They are also why this is dropped the moment it cannot serve — on a
+/// run that finishes, on a fresh start, on a change to what is being measured —
+/// since a master of a 45-megapixel sensor is a couple of hundred megabytes and
+/// there is no reason to hold that while the window sits idle.
+struct Stopped {
+    /// What was being measured. A continuation only continues the same thing;
+    /// change a folder or a threshold and the frames already measured are
+    /// answers to a different question.
+    of: String,
+    masters: astro_core::pipeline::MasterSet,
+    survey: astro_core::pipeline::Survey,
 }
 
 fn host() -> Result<PluginHost, String> {
@@ -415,17 +442,24 @@ async fn measure_quality(
     sigma: f32,
     max_stars: usize,
     raw: bool,
+    resume: bool,
     on: Channel<Progress>,
     state: State<'_, Running>,
 ) -> Result<QualityDto, String> {
-    journal::pass_async("measuring quality", measure(roots, sigma, max_stars, raw, on, state)).await
+    journal::pass_async(
+        if resume { "continuing quality" } else { "measuring quality" },
+        measure(roots, sigma, max_stars, raw, resume, on, state),
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn measure(
     roots: Roots,
     sigma: f32,
     max_stars: usize,
     raw: bool,
+    resume: bool,
     on: Channel<Progress>,
     state: State<'_, Running>,
 ) -> Result<QualityDto, String> {
@@ -435,6 +469,20 @@ async fn measure(
     }
     let cancel = state.cancel.clone();
     cancel.store(false, Ordering::Relaxed);
+
+    // Debug rather than a hand-written key: what identifies a run is every
+    // field of these, and a key listing them by hand would go stale the first
+    // time one is added.
+    let of = format!("{roots:?}|{sigma}|{max_stars}|{raw}");
+    let earlier = {
+        let mut slot = state.held.lock().unwrap_or_else(|held| held.into_inner());
+        let usable = resume && slot.as_ref().is_some_and(|held| held.of == of);
+        // Taken either way: what is in there cannot serve this run, and holding
+        // a few hundred megabytes for a continuation that will never come is
+        // worse than rebuilding.
+        let taken = slot.take();
+        if usable { taken } else { None }
+    };
 
     let host = host()?;
     let options = ScanOptions { rules, ..Default::default() };
@@ -453,8 +501,15 @@ async fn measure(
         return Err("the deepest plan names a set that is not in the partition".to_owned());
     };
 
+    let (kept_masters, earlier) = match earlier {
+        Some(held) => (Some(held.masters), Some(held.survey)),
+        None => (None, None),
+    };
+
     let stopped = || cancel.load(Ordering::Relaxed);
-    let masters = if raw {
+    let masters = if let Some(masters) = kept_masters {
+        masters
+    } else if raw {
         astro_core::pipeline::MasterSet::default()
     } else {
         let report = |step: Step<'_>| {
@@ -480,18 +535,53 @@ async fn measure(
 
     let ids: Vec<FrameId> =
         lights.members.iter().copied().filter(|id| session[*id].is_active()).collect();
+
+    let left = unread(session, &ids, earlier.as_ref());
+
+    // The bar carries on from where it stopped rather than restarting: the
+    // frames already measured are part of this run, and a continuation that
+    // counts from one reads as a second run of something smaller.
+    let behind = ids.len() - left.len();
     let detect = DetectOptions { detect_sigma: sigma, max_stars, ..Default::default() };
-    let survey = astro_core::pipeline::survey(&host, session, &ids, &masters, &detect, &|step| {
+    let mut survey = astro_core::pipeline::survey(&host, session, &left, &masters, &detect, &|step| {
         if let Step::FrameRead { done, total, name } = step {
-            let _ = on.send(Progress::Frame { done, total, name: name.to_owned() });
+            let _ = on.send(Progress::Frame {
+                done: behind + done,
+                total: behind + total,
+                name: name.to_owned(),
+            });
         }
         if stopped() { Flow::Stop } else { Flow::Continue }
     });
 
-    Ok(quality(&survey, max_stars))
+    if let Some(before) = earlier {
+        merge(&mut survey, before, session, &ids);
+    }
+
+    // Kept only while it can be continued. A finished run has nothing to carry
+    // on from, and holding its masters would be holding them forever.
+    //
+    // Stopped is not the same as unfinished: a pass finishes the frames already
+    // under way, so a stop that arrives near the end can leave nothing behind.
+    // Offering to continue that would be offering to do nothing.
+    let unfinished = survey.stopped && survey.frames.len() + survey.failed.len() < ids.len();
+    {
+        let mut slot = state.held.lock().unwrap_or_else(|held| held.into_inner());
+        *slot =
+            unfinished.then(|| Stopped { of, masters, survey: std::mem::take(&mut survey) });
+        if let Some(held) = slot.as_ref() {
+            return Ok(quality(&held.survey, max_stars, true));
+        }
+    }
+
+    Ok(quality(&survey, max_stars, false))
 }
 
-fn quality(survey: &astro_core::pipeline::Survey, star_cap: usize) -> QualityDto {
+fn quality(
+    survey: &astro_core::pipeline::Survey,
+    star_cap: usize,
+    continuable: bool,
+) -> QualityDto {
     let frames: Vec<FrameQualityDto> = survey
         .frames
         .iter()
@@ -547,10 +637,63 @@ fn quality(survey: &astro_core::pipeline::Survey, star_cap: usize) -> QualityDto
             .collect(),
         seconds: survey.seconds,
         stopped: survey.stopped,
+        continuable,
         direction,
         direction_agreement,
         star_cap,
     }
+}
+
+/// Frames of a run that a continuation still has to read.
+///
+/// A frame that could not be read counts as read: pressing continue will not
+/// make it readable, and retrying it on every continuation is a cost with no
+/// outcome. Measuring afresh is the way back to it.
+fn unread(
+    session: &Session,
+    ids: &[FrameId],
+    earlier: Option<&astro_core::pipeline::Survey>,
+) -> Vec<FrameId> {
+    let Some(earlier) = earlier else { return ids.to_vec() };
+    let measured: std::collections::HashSet<&std::path::Path> =
+        earlier.frames.iter().map(|frame| frame.path.as_path()).collect();
+    let failed: std::collections::HashSet<&str> =
+        earlier.failed.iter().map(|(name, _)| name.as_str()).collect();
+    ids.iter()
+        .copied()
+        .filter(|id| {
+            // Without a path there is nothing to match on, and reading a frame
+            // twice is better than losing it.
+            let Some(path) = session.path(*id) else { return true };
+            if measured.contains(path.as_path()) {
+                return false;
+            }
+            // The name a pass reports is the file's stem, and for a frame that
+            // failed to read it is the only handle left.
+            let stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned());
+            !stem.is_some_and(|stem| failed.contains(stem.as_str()))
+        })
+        .collect()
+}
+
+/// Folds what an earlier pass managed into this one.
+///
+/// Merged and re-ordered rather than appended: a stopped pass keeps what it
+/// managed in the order it was given, with gaps in it, so the frames that fill
+/// those gaps belong between the others rather than after them. The order is
+/// the run's own, which is what a report of a night has to be read in.
+fn merge(
+    into: &mut astro_core::pipeline::Survey,
+    earlier: astro_core::pipeline::Survey,
+    session: &Session,
+    ids: &[FrameId],
+) {
+    into.seconds += earlier.seconds;
+    into.failed.extend(earlier.failed);
+    into.frames.extend(earlier.frames);
+    let order: std::collections::HashMap<std::path::PathBuf, usize> =
+        ids.iter().enumerate().filter_map(|(at, id)| Some((session.path(*id)?, at))).collect();
+    into.frames.sort_by_key(|frame| order.get(&frame.path).copied().unwrap_or(usize::MAX));
 }
 
 /// The pixels of the last preview, as raw RGBA.
@@ -1259,7 +1402,7 @@ mod tests {
             &|_| Flow::Continue,
         );
 
-        let dto = quality(&survey, DetectOptions::default().max_stars);
+        let dto = quality(&survey, DetectOptions::default().max_stars, false);
         assert_eq!(dto.frames.len(), 6, "six frames measured");
         assert!(!dto.stopped);
 
@@ -1405,6 +1548,72 @@ mod tests {
             assert!(dir.join(name).is_file(), "{name} was named and is not there");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn continuing_a_stopped_measurement_reads_each_frame_once_and_keeps_the_run_in_order() {
+        // The point of continuing is not to read again what was already read,
+        // and the point of a report is that it is the night in order. A stopped
+        // pass finishes the frames already under way, so what it managed has
+        // gaps in it and the rest cannot simply be appended.
+        let Some(root) = testdata() else { return };
+        let host = host().expect("a plugin loads");
+        let options = ScanOptions {
+            rules: vec![RoleRule::new(root.join("lights"), Some(FrameKind::Light))],
+            ..Default::default()
+        };
+        let report = astro_core::session::scan(&host, &options).expect("the session scans");
+        let partition = report.session.partition(&Tolerances::default());
+        let session = &report.session;
+        let (plan, _) = partition.plans_by_depth(session)[0];
+        let lights = partition.set(plan.lights).expect("the plan has its set");
+        let ids: Vec<FrameId> = lights
+            .members
+            .iter()
+            .copied()
+            .filter(|id| session[*id].is_active())
+            .take(24)
+            .collect();
+
+        let masters = astro_core::pipeline::MasterSet::default();
+        let detect = DetectOptions::default();
+        let read = |ids: &[FrameId], stop_after: usize| {
+            let seen = std::sync::atomic::AtomicUsize::new(0);
+            astro_core::pipeline::survey(&host, session, ids, &masters, &detect, &|step| {
+                if let Step::FrameRead { .. } = step {
+                    seen.fetch_add(1, Ordering::Relaxed);
+                }
+                if seen.load(Ordering::Relaxed) >= stop_after { Flow::Stop } else { Flow::Continue }
+            })
+        };
+
+        let first = read(&ids, 4);
+        assert!(first.stopped, "the pass has to have been stopped for this to be about anything");
+        assert!(
+            first.frames.len() < ids.len(),
+            "and to have left something: {} of {}",
+            first.frames.len(),
+            ids.len()
+        );
+
+        let left = unread(session, &ids, Some(&first));
+        assert_eq!(
+            left.len() + first.frames.len(),
+            ids.len(),
+            "every frame is either read or still to read, and none is both"
+        );
+
+        let mut second = read(&left, usize::MAX);
+        merge(&mut second, first, session, &ids);
+
+        assert_eq!(second.frames.len(), ids.len(), "the whole run, once each");
+        let paths: Vec<&std::path::Path> =
+            second.frames.iter().map(|frame| frame.path.as_path()).collect();
+        let unique: std::collections::HashSet<&std::path::Path> = paths.iter().copied().collect();
+        assert_eq!(unique.len(), paths.len(), "no frame read twice");
+        let wanted: Vec<std::path::PathBuf> =
+            ids.iter().filter_map(|id| session.path(*id)).collect();
+        assert_eq!(paths, wanted.iter().map(|p| p.as_path()).collect::<Vec<_>>(), "in run order");
     }
 
     #[test]

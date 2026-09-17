@@ -31,6 +31,9 @@ export type Quality = {
   failed: { name: string; reason: string }[];
   seconds: number;
   stopped: boolean;
+  /** Осталось ли что продолжать. Не то же, что `stopped`: проход доводит уже
+   *  начатые кадры, и остановка под конец оставляет прогон целым. */
+  continuable: boolean;
   direction: number;
   directionAgreement: number;
   starCap: number;
@@ -66,13 +69,33 @@ class Measurement {
     return this.measured === signature(roots);
   }
 
-  async start(roots: Roots, sigma: number, maxStars: number, raw: boolean): Promise<void> {
+  /**
+   * Можно ли продолжить: прогон был остановлен, и с тех пор ничего не менялось.
+   *
+   * Отвечает на это та сторона: она держит то, из чего продолжать, и знает,
+   * осталось ли что. Здесь сверяется только набор кадров - если он сменился,
+   * показанное относится к другому вопросу.
+   */
+  canContinue(roots: Roots): boolean {
+    return !this.running && (this.result?.continuable ?? false) && this.isOf(roots);
+  }
+
+  async start(
+    roots: Roots,
+    sigma: number,
+    maxStars: number,
+    raw: boolean,
+    resume = false,
+  ): Promise<void> {
     // Второй замер поверх первого — не то, чего кто-либо хочет, и раньше это
     // было возможно: флаг жил в компоненте, а компонентов за прогон могло
     // смениться несколько.
     if (this.running) return;
     this.running = true;
     this.error = "";
+    // Продолжение возвращает прогон целиком, вместе с уже измеренным, поэтому
+    // старое стирается в обоих случаях — но только тогда, когда новое придёт
+    // на его место.
     this.result = null;
     this.progress = null;
     this.measured = signature(roots);
@@ -84,6 +107,7 @@ class Measurement {
         sigma,
         maxStars,
         raw,
+        resume,
         on: channel,
       });
       this.limit = null;
