@@ -94,6 +94,11 @@
     dark: "themeDark",
     light: "themeLight",
   } as const;
+  const THEME_SHORT = {
+    system: "themeSystemShort",
+    dark: "themeDarkShort",
+    light: "themeLightShort",
+  } as const;
   let aboutOpen = $state(false);
   let version = $state("");
   let formats = $state<string[]>([]);
@@ -368,26 +373,30 @@
       </button>
     {/each}
 
+    <!-- Язык, тема и справка — одной строкой в три равные доли, мельче шага
+         над ними: это обстановка вокруг работы, а не работа. Тремя строками
+         во всю ширину они читались как список настроек и занимали втрое
+         больше высоты. Так же устроено в соседнем проекте. -->
     <div class="railfoot">
+      <select
+        class="lang"
+        value={i18n.locale}
+        title={i18n.t("language")}
+        onchange={(e) => i18n.set(e.currentTarget.value as Locale)}
+      >
+        {#each LOCALES as l (l.id)}
+          <option value={l.id}>{l.label}</option>
+        {/each}
+      </select>
       <button
         class="ghost"
+        title={i18n.t(THEME_KEYS[theme])}
         onclick={() =>
           (theme = theme === "system" ? "dark" : theme === "dark" ? "light" : "system")}
       >
-        {i18n.t(THEME_KEYS[theme])}
+        {i18n.t(THEME_SHORT[theme])}
       </button>
       <button class="ghost" onclick={() => (aboutOpen = true)}>{i18n.t("about")}</button>
-      <label>
-        <span>{i18n.t("language")}</span>
-        <select
-          value={i18n.locale}
-          onchange={(e) => i18n.set(e.currentTarget.value as Locale)}
-        >
-          {#each LOCALES as l (l.id)}
-            <option value={l.id}>{l.label}</option>
-          {/each}
-        </select>
-      </label>
     </div>
   </nav>
 
@@ -620,7 +629,12 @@
 <style>
   .shell {
     display: grid;
-    grid-template-columns: 210px 1fr;
+    /* Ширину задаёт подвал: язык, тема и справка стоят в ряд по трети, и
+       «О программе» по-русски требует 75 пикселей на свою долю - уже в
+       240 подпись переносилась на две строки. Замерено, а не подобрано
+       на глаз. Колонке всё равно предстоит принять органы управления
+       (см. BACKLOG), так что запас здесь не роскошь. */
+    grid-template-columns: 270px 1fr;
     height: 100%;
   }
 
@@ -673,25 +687,31 @@
 
   .railfoot {
     margin-top: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
     padding-top: 16px;
-    font-size: 12px;
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    gap: 6px;
+    align-items: stretch;
   }
-  .railfoot label {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    color: var(--dim);
+  /* Подписи по центру своей доли, иначе прижатый влево язык выбивается из
+     ряда с кнопками. Отступы узкие: доля здесь - треть узкой колонки. */
+  .railfoot > * {
+    font-size: 11px;
+    text-align: center;
+    padding: 4px 2px;
+    min-width: 0;
   }
-  .railfoot select {
-    font: inherit;
-    padding: 4px 6px;
+  .railfoot .lang {
+    font-family: inherit;
     border-radius: 7px;
     border: 1px solid var(--line);
     background: var(--chipbg);
     color: var(--text);
+    cursor: pointer;
+  }
+  .railfoot .lang:hover {
+    border-color: var(--accent);
   }
 
   .content {

@@ -188,6 +188,12 @@ const ru = {
   themeSystem: "Тема: системная",
   themeDark: "Тема: тёмная",
   themeLight: "Тема: светлая",
+  // Короткие — для кнопки в подвале панели, где на подпись треть её ширины.
+  // Полные остаются подсказкой при наведении: в ряду с языком и справкой сама
+  // позиция говорит, что это тема, а вот какая именно — нет.
+  themeSystemShort: "Авто",
+  themeDarkShort: "Тёмная",
+  themeLightShort: "Светлая",
   language: "Язык",
   about: "О программе",
   aboutText:
@@ -387,6 +393,9 @@ const en: Record<Keys, string> = {
   themeSystem: "Theme: system",
   themeDark: "Theme: dark",
   themeLight: "Theme: light",
+  themeSystemShort: "Auto",
+  themeDarkShort: "Dark",
+  themeLightShort: "Light",
   language: "Language",
   about: "About",
   aboutText:
