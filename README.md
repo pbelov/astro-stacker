@@ -159,4 +159,11 @@ be worth doing next.
 
 ## Licence
 
-MIT or Apache-2.0, at your option.
+MIT or Apache-2.0, at your option — [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
+
+The raw decoder it is built on, [rawler](https://github.com/dnglab/dnglab), is
+LGPL-2.1, and is the only dependency that is not permissively licensed.
+Publishing this source is what lets anyone modify it and rebuild, which is what
+that licence asks for. [THIRD-PARTY.md](THIRD-PARTY.md) says so in full, and
+travels with every release.
