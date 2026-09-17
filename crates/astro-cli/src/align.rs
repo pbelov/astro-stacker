@@ -14,7 +14,7 @@ pub use astro_core::pipeline::align::{Aligned, Seed};
 #[derive(Args, Debug, Clone)]
 pub struct AlignArgs {
     /// Align against this frame rather than one chosen from the middle of the
-    /// run. Give the file stem, as printed.
+    /// run. Give the file name, as printed, extension included.
     #[arg(long, value_name = "NAME")]
     pub reference: Option<String>,
 

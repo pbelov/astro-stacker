@@ -668,10 +668,10 @@ fn unread(
             if measured.contains(path.as_path()) {
                 return false;
             }
-            // The name a pass reports is the file's stem, and for a frame that
+            // The name a pass reports is the file's name, and for a frame that
             // failed to read it is the only handle left.
-            let stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned());
-            !stem.is_some_and(|stem| failed.contains(stem.as_str()))
+            let name = path.file_name().map(|name| name.to_string_lossy().into_owned());
+            !name.is_some_and(|name| failed.contains(name.as_str()))
         })
         .collect()
 }
@@ -1425,6 +1425,14 @@ mod tests {
         for frame in &dto.frames {
             assert!(frame.stars > 0, "{} found no stars", frame.name);
             assert!(frame.trail.is_finite(), "{} has no trail", frame.name);
+            // The whole file name, extension included. It is what the report is
+            // read against the folder with, and what `--exclude` matches on, so
+            // a shorter spelling here would be a second name for one frame.
+            assert!(
+                frame.name.to_ascii_lowercase().ends_with(".cr2"),
+                "a frame is named by its file: {}",
+                frame.name
+            );
         }
     }
 

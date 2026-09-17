@@ -374,9 +374,13 @@ pub fn survey_with_workers(
         if reporter.stopped() {
             return None;
         }
+        // The file name, extension and all, because this is the name the run is
+        // reported under and the one that has to be typed back in: `--exclude`
+        // already matches on it, and a report printing something shorter left
+        // the two spellings of a frame's name disagreeing.
         let name = session
             .path(id)
-            .and_then(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
             .unwrap_or_else(|| format!("frame {}", id.index()));
         let mut lane = idle.lock().unwrap_or_else(|p| p.into_inner()).pop().unwrap_or_default();
         let outcome = read_one(host, session, id, &name, masters, options, &mut lane);
