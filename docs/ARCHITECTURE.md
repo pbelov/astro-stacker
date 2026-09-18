@@ -507,19 +507,30 @@ crates/astro-cli          the astro-stacker binary
 apps/desktop              the window: Tauri 2 and Svelte 5
     src-tauri/src/lib.rs    the bridge; holds no decisions of its own
     src/ui/                 palette and parts shared with the sibling projects
-crates/astro-format-canon  CR2/CR3, via rawler
+crates/astro-format-raw    camera raw, via rawler
 ```
 
 ## Which decoder gets a file
 
 Each is shown the path and the first 4 KiB, read once, and answers with a
-confidence; the highest bid wins. A decoder is expected to check magic numbers
+confidence; the highest bid wins. A decoder is expected to identify the file
 rather than trust the extension, which is what makes a file the user named by
 hand readable whatever it is called.
 
-The extensions a decoder declares narrow a directory walk and nothing else. They
-are also a claim about what has been run against real frames rather than about
-what the underlying library could in principle read.
+The 4 KiB is an offer, not a limit, and the one decoder here declines it. A raw
+is identified by asking `rawler` for a decoder, which builds one, which parses
+index structures living well past the header — measured against six real frames,
+a 4 KiB slice identified none of them and the whole file identified all six in
+about 0.3 ms. So `probe` opens the file. Keeping a table of container magics
+here to avoid that would be a second copy of what rawler already knows, and the
+copy that goes stale without anyone noticing. Probing runs once per candidate
+file; 0.3 ms against several hundred frames is a third of a second.
+
+The extensions a decoder declares narrow a directory walk and nothing else.
+`astro-format-raw` takes them from `rawler::decoders::supported_extensions()`,
+so the list is the library's rather than ours — 29 of them. That is a claim
+about what rawler offers to read, not about what has been verified here; the
+rule this replaced, and why, is in CLAUDE.md.
 
 ## What is deliberately not built yet
 

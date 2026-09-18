@@ -30,7 +30,7 @@ tree = subprocess.run(
      '--prefix', 'none', '--no-dedupe'],
     cwd=ROOT + 'apps/desktop/src-tauri', capture_output=True, text=True, encoding='utf-8',
 )
-OWN = {'astro-stacker-desktop', 'astro-core', 'astro-format-canon', 'astro-cli'}
+OWN = {'astro-stacker-desktop', 'astro-core', 'astro-format-raw', 'astro-cli'}
 pkgs = set()
 for line in tree.stdout.splitlines():
     m = re.match(r'^([A-Za-z0-9_.-]+) v([0-9][^ ]*)', line.strip())

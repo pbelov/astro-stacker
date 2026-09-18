@@ -22,7 +22,7 @@ whole night is read and grouped in 0.13 s.
 |---|---|
 | [`astro-core`](crates/astro-core) | The frame model, the format registry, and the session model: classification, grouping and compatibility |
 | [`astro-cli`](crates/astro-cli) | `astro-stacker` command line binary |
-| [`astro-format-canon`](crates/astro-format-canon) | Canon CR2/CR3 reader, built on [rawler](https://crates.io/crates/rawler) |
+| [`astro-format-raw`](crates/astro-format-raw) | Camera raw reader, built on [rawler](https://crates.io/crates/rawler) |
 
 ## Building
 

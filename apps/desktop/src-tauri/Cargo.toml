@@ -1,7 +1,7 @@
 [package]
 name = "astro-stacker-desktop"
 description = "Desktop shell for astro-stacker (Tauri 2)"
-version = "0.24.2"
+version = "0.25.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -26,7 +26,7 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 astro-core = { path = "../../../crates/astro-core" }
-astro-format-canon = { path = "../../../crates/astro-format-canon" }
+astro-format-raw = { path = "../../../crates/astro-format-raw" }
 tauri-plugin-log = "2.9.1"
 tauri-plugin-opener = "2.5.5"
 log = "0.4.34"

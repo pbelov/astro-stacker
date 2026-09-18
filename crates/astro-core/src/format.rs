@@ -25,12 +25,19 @@ use crate::frame::{
 pub trait Format: Send + Sync + 'static {
     fn description(&self) -> &FormatDescription;
 
-    /// Decides whether this decoder should handle a file, without opening it.
+    /// Decides whether this decoder should handle a file.
     ///
     /// `header` holds the leading bytes of the file, already read, and may be
-    /// shorter than asked for or empty for a zero-length file. Return
+    /// shorter than asked for or empty for a zero-length file. It is offered so
+    /// that a decoder able to answer from a few kilobytes need not touch the
+    /// disk again. A decoder that cannot answer from it may open the file, and
+    /// the raw decoder does: identifying a raw means parsing index structures
+    /// that live well past the header. Return
     /// [`PROBE_UNSUPPORTED`][crate::frame::PROBE_UNSUPPORTED], or a confidence
     /// in `0..=`[`PROBE_CERTAIN`].
+    ///
+    /// This runs once per candidate file, so whatever it costs is paid several
+    /// hundred times over in a night's session.
     fn probe(&self, path: &Path, header: &[u8]) -> i32;
 
     /// Opens a file and parses its headers. Pixels are decoded later.

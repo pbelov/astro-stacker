@@ -1,15 +1,20 @@
-//! Canon CR2 and CR3 support.
+//! Camera raw support, whatever camera wrote it.
 //!
 //! Decoding is delegated to [`rawler`], which is pure Rust — no CMake, no
 //! vcpkg, no C toolchain. This crate's job is to map rawler's model onto the
 //! stacker's own, and to be honest about what it cannot express.
 //!
-//! rawler reads far more than Canon, and this crate declares only what has been
-//! run against real frames from real bodies. Claiming a format nobody has tried
-//! would be claiming it works.
+//! What can be read is rawler's answer rather than a list kept here: the
+//! extensions come from [`rawler::decoders::supported_extensions`] at run time,
+//! and a file is identified by asking rawler for a decoder. Neither is a table
+//! in this crate, so neither can drift from what the library actually does.
+//!
+//! That is a deliberate widening, and its cost is real: frames from six Canon
+//! bodies have been decoded and stacked here, and the rest of the cameras
+//! rawler names have not been tried. Offering them anyway was the owner's call
+//! — see CLAUDE.md, which carries the rule this replaced.
 
 mod datetime;
-mod magic;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -26,28 +31,27 @@ use rawler::rawimage::RawPhotometricInterpretation;
 use rawler::rawsource::RawSource;
 use rawler::{RawImage, RawImageData};
 
-const ID: &str = "canon-raw";
-const EXTENSIONS: [&str; 2] = ["cr2", "cr3"];
+const ID: &str = "camera-raw";
 
 /// The decoder itself: no state, since everything it needs comes with the file.
-pub struct Canon {
+pub struct Raw {
     description: FormatDescription,
 }
 
-impl Default for Canon {
+impl Default for Raw {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Canon {
+impl Raw {
     pub fn new() -> Self {
         Self { description: describe() }
     }
 }
 
-/// One Canon file, opened and understood.
-pub struct CanonRaw {
+/// One raw file, opened and understood.
+pub struct RawFrame {
     /// Kept so a failure partway through decoding can say which file it was.
     path: std::path::PathBuf,
     /// Memory-mapped file. Kept open so decoding does not re-read from disk.
@@ -62,30 +66,51 @@ pub struct CanonRaw {
 fn describe() -> FormatDescription {
     FormatDescription {
         id: ID.to_owned(),
-            display_name: "Canon CR2/CR3".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            author: "Pavel Belov".to_owned(),
-        extensions: EXTENSIONS.iter().map(|e| (*e).to_owned()).collect(),
+        display_name: "Camera raw".to_owned(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        author: "Pavel Belov".to_owned(),
+        // rawler's own list rather than one kept here, so the two cannot
+        // disagree. It is upper-case at the source; paths are matched in lower.
+        extensions: {
+            let mut extensions: Vec<String> = rawler::decoders::supported_extensions()
+                .iter()
+                .map(|extension| extension.to_lowercase())
+                .collect();
+            extensions.sort();
+            extensions
+        },
     }
 }
 
-impl Format for Canon {
+impl Format for Raw {
     fn description(&self) -> &FormatDescription {
         &self.description
     }
 
-    fn probe(&self, _path: &Path, header: &[u8]) -> i32 {
-        magic::identify(header).map_or(PROBE_UNSUPPORTED, |_| PROBE_CERTAIN)
+    /// Asks rawler whether it has a decoder for the file, which means opening
+    /// it rather than reading the header the registry offers.
+    ///
+    /// Measured rather than assumed: `get_decoder` builds the decoder, and the
+    /// index structures it parses sit far past the first four kilobytes, so on
+    /// a 4 KiB slice it identified none of six real Canon frames. Given the
+    /// whole file it identifies all six in about 0.3 ms and refuses a JPEG and
+    /// a plain TIFF. A table of container magics kept here would be a second
+    /// copy of what rawler already knows, and the copy that goes stale quietly.
+    fn probe(&self, path: &Path, _header: &[u8]) -> i32 {
+        RawSource::new(path)
+            .ok()
+            .filter(|source| rawler::get_decoder(source).is_ok())
+            .map_or(PROBE_UNSUPPORTED, |_| PROBE_CERTAIN)
     }
 
     fn open(&self, path: &Path) -> astro_core::Result<Box<dyn Frame>> {
-        CanonRaw::open(path)
+        RawFrame::open(path)
             .map(|frame| Box::new(frame) as Box<dyn Frame>)
             .map_err(|why| why.at(path))
     }
 }
 
-impl CanonRaw {
+impl RawFrame {
     fn open(path: &Path) -> Result<Self, Unreadable> {
         let source = RawSource::new(path).map_err(|err| Unreadable::io(err.to_string()))?;
         let decoder = rawler::get_decoder(&source)
@@ -141,7 +166,7 @@ impl CanonRaw {
     }
 }
 
-impl Frame for CanonRaw {
+impl Frame for RawFrame {
     fn layout(&self) -> &ImageLayout {
         &self.layout
     }
@@ -196,7 +221,7 @@ impl Unreadable {
 fn layout_from(raw: &RawImage, metadata: &RawMetadata) -> Result<ImageLayout, Unreadable> {
     if !matches!(raw.data, RawImageData::Integer(_)) {
         return Err(Unreadable::unsupported(
-            "this plugin only reads integer sensor data; no Canon format produces floating-point raw",
+            "this decoder reads integer sensor data only, and this file stores floating-point samples",
         ));
     }
 
@@ -350,9 +375,9 @@ fn info_from(metadata: &RawMetadata) -> FrameInfo {
             .as_deref()
             .or(exif.create_date.as_deref())
             .and_then(datetime::parse_exif),
-        // Canon records sensor temperature in its makernotes, but rawler does
-        // not surface it in the generalised metadata. Claiming a value we
-        // cannot read would be worse than admitting we have none.
+        // Cameras that record sensor temperature keep it in their makernotes,
+        // and rawler does not surface it in the generalised metadata. Claiming
+        // a value we cannot read would be worse than admitting we have none.
         sensor_temperature_c: None,
     }
 }
@@ -386,6 +411,61 @@ fn positive_rational(value: Rational) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Frames from the owner's bodies, one file per camera. Gitignored, so the
+    /// test says nothing rather than failing on a machine without them.
+    fn real_frames() -> Vec<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+        entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.extension().is_some_and(|extension| {
+                    let extension = extension.to_string_lossy().to_lowercase();
+                    extension == "cr2" || extension == "cr3"
+                })
+            })
+            .collect()
+    }
+
+    /// The probe opens the file instead of reading the header it is handed, and
+    /// this is the test that would catch the day that stops being necessary or
+    /// stops working. Both directions matter: a frame must be claimed, and the
+    /// program's own output must not be, or a stack dropped back into a session
+    /// would be read as a light.
+    #[test]
+    fn claims_a_real_frame_and_refuses_what_is_not_one() {
+        let frames = real_frames();
+        if frames.is_empty() {
+            return;
+        }
+        let format = Raw::new();
+        for path in &frames {
+            assert_eq!(format.probe(path, &[]), PROBE_CERTAIN, "{}", path.display());
+        }
+
+        let root = frames[0].parent().expect("testdata").to_owned();
+        for name in ["2026-09-11-astro/stack-as.tif", "2026-09-11-astro/stack-as.jpg"] {
+            let path = root.join(name);
+            if path.exists() {
+                assert_eq!(format.probe(&path, &[]), PROBE_UNSUPPORTED, "{}", path.display());
+            }
+        }
+        assert_eq!(format.probe(&root.join("no-such-file.cr2"), &[]), PROBE_UNSUPPORTED);
+    }
+
+    /// The extensions are rawler's rather than ours; what this pins is the
+    /// shape they are handed over in, since paths are matched in lower case.
+    #[test]
+    fn declares_rawlers_extensions_in_lower_case() {
+        let description = Raw::new().description().clone();
+        assert!(description.extensions.len() > 20, "{:?}", description.extensions);
+        assert!(description.extensions.iter().all(|e| e == &e.to_lowercase()));
+        assert!(description.extensions.windows(2).all(|pair| pair[0] < pair[1]));
+        for known in ["cr2", "cr3", "nef", "arw", "dng"] {
+            assert!(description.extensions.iter().any(|e| e == known), "{known} missing");
+        }
+    }
 
     #[test]
     fn iso_prefers_the_extended_tag_only_when_the_short_one_saturated() {

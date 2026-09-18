@@ -370,7 +370,7 @@ fn host() -> Result<&'static Formats, String> {
 
 fn load_formats() -> Result<Formats, String> {
     let mut formats = Formats::new();
-    formats.add(astro_format_canon::Canon::new()).map_err(|why| format!("{why:#}"))?;
+    formats.add(astro_format_raw::Raw::new()).map_err(|why| format!("{why:#}"))?;
     for format in formats.formats() {
         let description = format.description();
         log::info!("reads {} ({})", description.extensions.join(", "), description.id);

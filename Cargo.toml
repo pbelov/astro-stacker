@@ -2,12 +2,12 @@
 resolver = "3"
 members = [
     "crates/astro-core",
-    "crates/astro-format-canon",
+    "crates/astro-format-raw",
     "crates/astro-cli",
 ]
 
 [workspace.package]
-version = "0.24.2"
+version = "0.25.0"
 edition = "2024"
 # Everything but the decoder, which declares its own: rawler's floor is lower
 # than ours and there is no reason to hold the rest of the project back to it.
@@ -17,7 +17,7 @@ authors = ["Pavel Belov <psbelov@gmail.com>"]
 
 [workspace.dependencies]
 astro-core = { path = "crates/astro-core" }
-astro-format-canon = { path = "crates/astro-format-canon" }
+astro-format-raw = { path = "crates/astro-format-raw" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

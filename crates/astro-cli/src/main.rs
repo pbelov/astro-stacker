@@ -156,7 +156,7 @@ fn main() -> Result<()> {
 /// on. Adding a format is adding a line here and a crate beside it.
 fn formats() -> Result<Formats> {
     let mut formats = Formats::new();
-    formats.add(astro_format_canon::Canon::new())?;
+    formats.add(astro_format_raw::Raw::new())?;
     Ok(formats)
 }
 

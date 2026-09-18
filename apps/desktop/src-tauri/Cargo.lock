@@ -87,7 +87,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "astro-core"
-version = "0.24.2"
+version = "0.25.0"
 dependencies = [
  "log",
  "rayon",
@@ -96,8 +96,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "astro-format-canon"
-version = "0.24.2"
+name = "astro-format-raw"
+version = "0.25.0"
 dependencies = [
  "astro-core",
  "rawler",
@@ -105,10 +105,10 @@ dependencies = [
 
 [[package]]
 name = "astro-stacker-desktop"
-version = "0.24.2"
+version = "0.25.0"
 dependencies = [
  "astro-core",
- "astro-format-canon",
+ "astro-format-raw",
  "log",
  "serde",
  "serde_json",

@@ -38,11 +38,26 @@ That last part is the rule worth keeping: no format may become a branch inside
 the pipeline. Adding one is a crate beside the others and a line where they are
 assembled.
 
-A decoder is named for what it has been run against, not for what its library
-could in principle read. `rawler` reads some 1800 cameras; `astro-format-canon`
-declares `cr2` and `cr3` because those are what real frames from real bodies
-have been decoded and stacked. Claiming a format nobody has tried is claiming it
-works.
+`astro-format-raw` declares whatever `rawler` declares: the extension list comes
+from `rawler::decoders::supported_extensions()` at run time, and a file is
+identified by asking rawler for a decoder rather than by a table of magic bytes
+kept here. Some 1800 cameras, 29 extensions.
+
+This replaced the opposite rule, which said a decoder may name only what it has
+been run against, and the replacement was the owner's decision, made knowingly:
+frames from six Canon bodies have been decoded and stacked here and nothing else
+has been tried. Refusing a file the library can read was judged the worse
+failure. What the old rule was protecting against is still real, so it moves
+from a promise to a requirement on failure:
+
+* **A file that cannot be read must say why in words the user can act on.** That
+  is now the whole of the guarantee, and it is where the effort goes. A panic
+  message from inside the decoder is not such a sentence — see BACKLOG.md on the
+  crop-mode frame, which is the shape this failure takes.
+* **Do not claim a camera works.** The program claims that rawler offers to read
+  the file, which is a different sentence and the only one that is true.
+* **A body the owner shoots stays verified by hand** against real frames, as
+  below.
 
 ## Conventions
 

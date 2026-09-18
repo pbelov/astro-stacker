@@ -223,7 +223,7 @@ pub struct FrameInfo {
 /// A decoder's static identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatDescription {
-    /// Stable machine-readable id, e.g. `canon-raw`.
+    /// Stable machine-readable id, e.g. `raw`.
     pub id: String,
     pub display_name: String,
     pub version: String,

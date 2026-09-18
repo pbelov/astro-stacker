@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 astro-core.workspace = true
-astro-format-canon.workspace = true
+astro-format-raw.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 env_logger.workspace = true

@@ -219,12 +219,12 @@ rem само: оно оконное, из скрипта его не спрос�
 rem WebView2 на машине, где его запустят.
 echo.
 echo --- Проверка ---
-"%STAGE%\astro-stacker.exe" formats | findstr /i "canon" >nul
+"%STAGE%\astro-stacker.exe" formats | findstr /i "camera-raw" >nul
 if not "%ERRORLEVEL%"=="0" (
-  echo [ОШИБКА] собранный astro-stacker не читает формат Canon.
+  echo [ОШИБКА] собранный astro-stacker не читает сырые кадры.
   exit /b 1
 )
-echo   формат Canon читается
+echo   сырые кадры читаются
 
 echo.
 echo --- В архив ---

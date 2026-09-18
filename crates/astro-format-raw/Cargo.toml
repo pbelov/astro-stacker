@@ -1,6 +1,6 @@
 [package]
-name = "astro-format-canon"
-description = "Canon CR2/CR3 reader for astro-stacker"
+name = "astro-format-raw"
+description = "Camera raw reader for astro-stacker, built on rawler"
 version.workspace = true
 edition.workspace = true
 # Not the workspace's: the floor here is rawler's rather than ours, and this
