@@ -14,7 +14,7 @@ export const LOCALES: { id: Locale; label: string }[] = [
 ];
 
 const ru = {
-  appName: "AstroStacker",
+  appName: "AstroAccretion",
 
   stepFrames: "Кадры",
   stepQuality: "Качество",
@@ -217,7 +217,7 @@ const ru = {
 export type Keys = keyof typeof ru;
 
 const en: Record<Keys, string> = {
-  appName: "AstroStacker",
+  appName: "AstroAccretion",
 
   stepFrames: "Frames",
   stepQuality: "Quality",

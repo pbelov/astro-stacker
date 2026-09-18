@@ -26,3 +26,6 @@ dist/
 /apps/desktop/dist
 /apps/desktop/src-tauri/target
 /apps/desktop/src-tauri/gen
+
+# Python-мусор от скриптов в tools/
+__pycache__/

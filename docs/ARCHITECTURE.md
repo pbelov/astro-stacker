@@ -449,6 +449,42 @@ makes 15.8 billion of them, and the threads fought over one cache line for
 twenty times longer than the work itself took. They are counted per band and
 added once.
 
+### The program is called AstroAccretion, and its mark is a pinwheel galaxy
+
+`astro-stacker` names the category, not the program, and it stays only as the
+crate and binary names until renaming them is worth a commit of its own. What
+the user sees — the window, the installer, the About box — says AstroAccretion.
+
+Accretion is what the program does to a night: many small arrivals, none of
+them enough alone, accumulating into one body. The name also keeps the family
+audible beside the sibling projects — star-trails ships as StarTrailsX, and the
+video tool as VideoColdWeld.
+
+The mark is a face-on spiral galaxy, drawn in `tools/gen-icons.py` rather than
+in a binary a vector editor owns, so that it can be re-rendered at any size and
+so that the reasons below stay next to the thing they explain.
+
+Three things about it were settled by testing rather than by taste, and testing
+meant rasterising to 16 pixels and magnifying, because a vector stays clean at
+every scale and therefore lies about what survives:
+
+* **The arms are a sheaf of thin arcs, not a scatter of dots and not a solid
+  blade.** Dots were the first drawing and the truest to a photograph; at 16
+  pixels a dot is smaller than a pixel, averages into haze, and the mark becomes
+  a warm smudge. Solid blades survive the size but read as a fan, because the
+  gaps between them are too regular and the tips end in points.
+* **The small sizes are a different drawing, not the large one shrunk.** Eleven
+  arcs per arm are texture at 512 and mud at 24, so sizes below 48 are rendered
+  from a simplified mark — five thicker arcs, same silhouette, same palette.
+  Both are in the one script, which is why they cannot drift apart.
+* **It is brighter and denser than the sibling's icon on purpose.** Matched to
+  it exactly, it would inherit the sibling's weakness: that icon dissolves at 48
+  and is a blob at 16. The palette, the dark square bled to the edge, and the
+  thin-arc language are shared; the density is not.
+
+The file-type icon is the same mark on a page, and the extension it will belong
+to is not settled — see BACKLOG.md.
+
 ## Layout
 
 ```

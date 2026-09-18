@@ -5,6 +5,7 @@
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import { onDestroy, onMount } from "svelte";
 
+  import appIcon from "./ui/app-icon.png";
   import DropZone from "./ui/DropZone.svelte";
   import Quality from "./Quality.svelte";
   import Stack from "./Stack.svelte";
@@ -575,8 +576,13 @@
     onkeydown={(e) => e.key === "Escape" && (aboutOpen = false)}
   >
     <div class="modal" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
-      <h2>{i18n.t("appName")}</h2>
-      <p class="muted">{i18n.t("version", { v: version })}</p>
+      <div class="mark">
+        <img src={appIcon} alt="" width="56" height="56" />
+        <div>
+          <h2>{i18n.t("appName")}</h2>
+          <p class="muted">{i18n.t("version", { v: version })}</p>
+        </div>
+      </div>
       <p>{i18n.t("aboutText")}</p>
       {#if formats.length > 0}
         <p class="muted">{i18n.t("formatsRead", { list: formats.join(", ") })}</p>
@@ -768,6 +774,23 @@
     background: rgba(0, 0, 0, 0.55);
     display: grid;
     place-items: center;
+  }
+  /* Знак рядом с именем, а не над ним: диалог узкий, и вертикаль в нём
+     дороже горизонтали. */
+  .mark {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .mark h2 {
+    margin: 0;
+  }
+  .mark p {
+    margin: 2px 0 0;
+  }
+  .mark img {
+    border-radius: 10px;
+    flex: none;
   }
   .modal {
     background: var(--surface);
