@@ -36,11 +36,18 @@ chance.
 
 The decoder panics on its own bounds check when a frame's crop area runs past
 its active area, which is what an R5 Mark II in crop mode produces — and what a
-compressed X-T2 RAF produces, for the same reason. The panic is contained at the
-plugin boundary, so nothing worse happens: the process lives and the frame lands
-in the rejected list. What it lands there with is a panic message, which tells
-the user nothing they can act on and does not say the frame was shot in a mode
-this program cannot yet read.
+compressed X-T2 RAF produces, for the same reason. The panic used to be caught
+by the plugin ABI; the plugins are gone and `Formats::open` catches it now, so
+the outcome is unchanged: the process lives and the frame lands in the rejected
+list. What it lands there with is a panic message, which tells the user nothing
+they can act on and does not say the frame was shot in a mode this program
+cannot yet read.
+
+That last part got heavier when the decoder was widened to whatever rawler
+reads. CLAUDE.md now rests the whole guarantee on it: the program claims only
+that rawler offers to read a file, and what it owes in return is a sentence
+saying why one could not be read. A relayed panic is not that sentence, and
+there are now 29 extensions’ worth of ways to reach it.
 
 Not reproduced here — there is no crop-mode frame in the test data — and taken
 from the sibling star-trails project, where the same decoder at the same version

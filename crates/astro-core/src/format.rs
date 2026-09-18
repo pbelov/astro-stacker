@@ -11,8 +11,10 @@
 //! container properly outrank one that only recognises the suffix, and what
 //! makes a file the user named by hand readable whatever it is called.
 
+use std::any::Any;
 use std::fs::File;
 use std::io::Read;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -111,7 +113,10 @@ impl Formats {
 
         let mut best: Option<(i32, &Arc<dyn Format>)> = None;
         for format in &self.formats {
-            let score = format.probe(path, &header);
+            // A decoder that falls over while deciding whether it wants a file
+            // has answered: it does not.
+            let score = std::panic::catch_unwind(AssertUnwindSafe(|| format.probe(path, &header)))
+                .unwrap_or(crate::frame::PROBE_UNSUPPORTED);
             if score < 0 {
                 continue;
             }
@@ -125,7 +130,7 @@ impl Formats {
             .map(|(_, format)| Arc::clone(format))
             .ok_or_else(|| Error::UnsupportedFormat { path: path.to_owned() })?;
 
-        let frame = format.open(path)?;
+        let frame = contain(&format, "open", path, || format.open(path))?;
         validate(&format, frame.layout(), path)?;
         Ok(OpenFrame { format, frame, path: path.to_owned() })
     }
@@ -177,7 +182,53 @@ impl OpenFrame {
     }
 
     fn fill(&self, dst: &mut [u8]) -> Result<()> {
-        self.frame.read_samples(dst)
+        contain(&self.format, "decode", &self.path, || self.frame.read_samples(dst))
+    }
+}
+
+/// Runs a decoder and turns a panic inside it into an error naming the file.
+///
+/// A decoder is a library's worth of parsing pointed at a file that may be
+/// truncated, mislabelled, or written by a body nobody here owns, and `rawler`
+/// enforces its bounds by panicking — the crop-mode frame in BACKLOG.md is one
+/// such case, and it is reachable with a Canon frame, not only with the wider
+/// net. This used to be caught by the plugin ABI, which could not let a panic
+/// cross `extern "C"`. The plugins are gone; the catch has to live somewhere,
+/// and this is the one place every decoder call passes through.
+///
+/// Containment stops at one frame. The panic still reaches the log through the
+/// hook, and the frame lands in the rejected list with a reason, which is the
+/// whole point: one unreadable file must not end a night's run.
+///
+/// `AssertUnwindSafe` is honest here because nothing the decoder touched is
+/// read afterwards: the frame is dropped, and the destination buffer leaves
+/// with the error rather than being handed back half-filled.
+fn contain<T>(
+    format: &Arc<dyn Format>,
+    action: &'static str,
+    path: &Path,
+    call: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    std::panic::catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|panic| {
+        Err(Error::Decode {
+            format: format.description().id.clone(),
+            action,
+            path: path.to_owned(),
+            // `as_ref`, not `&panic`: the box itself implements `Any`, so
+            // borrowing it downcasts the box and never finds the message.
+            message: format!("the decoder panicked: {}", panic_message(panic.as_ref())),
+        })
+    })
+}
+
+/// What a panic said, if it said anything a human wrote.
+fn panic_message(panic: &(dyn Any + Send)) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "no message".to_owned()
     }
 }
 
@@ -236,4 +287,137 @@ fn bytemuck_u16(buffer: &mut [u16]) -> &mut [u8] {
 fn bytemuck_f32(buffer: &mut [f32]) -> &mut [u8] {
     // SAFETY: as above.
     unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr().cast::<u8>(), size_of_val(buffer)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::SampleFormat;
+
+    /// A decoder that falls over wherever it is told to.
+    struct Falls {
+        where_: &'static str,
+        description: FormatDescription,
+    }
+
+    struct FallsFrame {
+        reads: bool,
+        layout: ImageLayout,
+        info: FrameInfo,
+    }
+
+    impl Falls {
+        fn new(where_: &'static str) -> Self {
+            Self {
+                where_,
+                description: FormatDescription {
+                    id: "falls".to_owned(),
+                    display_name: "Falls over".to_owned(),
+                    version: "0".to_owned(),
+                    author: "test".to_owned(),
+                    extensions: vec!["fall".to_owned()],
+                },
+            }
+        }
+    }
+
+    impl Format for Falls {
+        fn description(&self) -> &FormatDescription {
+            &self.description
+        }
+
+        fn probe(&self, _path: &Path, _header: &[u8]) -> i32 {
+            assert!(self.where_ != "probe", "fell while probing");
+            PROBE_CERTAIN
+        }
+
+        fn open(&self, _path: &Path) -> Result<Box<dyn Frame>> {
+            assert!(self.where_ != "open", "fell while opening");
+            let layout = ImageLayout {
+                width: 2,
+                height: 2,
+                components: 1,
+                bits_per_sample: 16,
+                sample_format: SampleFormat::U16,
+                ..ImageLayout::default()
+            };
+            Ok(Box::new(FallsFrame {
+                reads: self.where_ == "read",
+                layout,
+                info: FrameInfo::default(),
+            }))
+        }
+    }
+
+    impl Frame for FallsFrame {
+        fn layout(&self) -> &ImageLayout {
+            &self.layout
+        }
+
+        fn info(&self) -> &FrameInfo {
+            &self.info
+        }
+
+        fn read_samples(&self, _dst: &mut [u8]) -> Result<()> {
+            assert!(!self.reads, "fell while reading");
+            Ok(())
+        }
+    }
+
+    /// Runs `call` with the panic hook silenced, so a test that expects a panic
+    /// does not print one and read as a failure.
+    fn quietly<T>(call: impl FnOnce() -> T) -> T {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let out = call();
+        std::panic::set_hook(hook);
+        out
+    }
+
+    fn a_file() -> PathBuf {
+        let path = std::env::temp_dir().join("astro-core-falls.fall");
+        std::fs::write(&path, b"whatever").expect("write");
+        path
+    }
+
+    /// The decoder is a library's worth of parsing pointed at files it has
+    /// never seen, and `rawler` enforces bounds by panicking. One such file
+    /// must cost its own frame and nothing more: before this, it ended the run.
+    #[test]
+    fn a_decoder_that_panics_costs_one_frame_and_says_why() {
+        let path = a_file();
+
+        for (where_, action) in [("open", "open"), ("read", "decode")] {
+            let mut formats = Formats::new();
+            formats.add(Falls::new(where_)).expect("add");
+
+            let outcome = quietly(|| {
+                let opened = formats.open(&path)?;
+                opened.decode().map(|_| ())
+            });
+
+            let Err(Error::Decode { action: said_action, message, .. }) = outcome else {
+                panic!("a panic in {where_} must come back as a decode error: {outcome:?}");
+            };
+            assert_eq!(said_action, action);
+            assert!(message.contains("panicked"), "{message}");
+            assert!(message.contains(&format!("fell while {where_}")), "{message}");
+        }
+    }
+
+    /// A decoder that cannot even decide whether it wants the file has decided.
+    #[test]
+    fn a_decoder_that_panics_while_probing_simply_does_not_bid() {
+        let path = a_file();
+        let mut formats = Formats::new();
+        formats.add(Falls::new("probe")).expect("add");
+
+        // `OpenFrame` is not `Debug` on purpose, so the failure is spelled out
+        // here rather than printed.
+        match quietly(|| formats.open(&path)) {
+            Err(Error::UnsupportedFormat { .. }) => {}
+            Err(other) => panic!("wrong error for a decoder that fell while probing: {other}"),
+            Ok(_) => panic!("a decoder that fell while probing must not win the bid"),
+        }
+    }
 }
