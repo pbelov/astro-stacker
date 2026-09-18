@@ -234,10 +234,12 @@ def main():
     at(tiny, 32).save(ICONS + "/32x32.png")
     at(big, 256).save(UI + "/app-icon.png")
 
-    # Ниже 48 берётся упрощённый знак, выше — подробный.
+    # Упрощённый знак держится дольше, чем казалось: на 48 и 64 у подробного
+    # рукава уже слипаются, а у него ещё разделены. Подробный берёт своё со
+    # 128, где его фактура наконец видна, а не превращается в муть.
     for name, low, high in (("icon.ico", tiny, big), ("file.ico", page_tiny, page_big)):
         sizes = [16, 24, 32, 48, 64, 128, 256]
-        frames = [at(low if s < 48 else high, s) for s in sizes]
+        frames = [at(low if s < 128 else high, s) for s in sizes]
         frames[-1].save(ICONS + "/" + name, format="ICO",
                         sizes=[(s, s) for s in sizes], append_images=frames)
 
