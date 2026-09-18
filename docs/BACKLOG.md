@@ -32,38 +32,35 @@ Done when the sequence runs clean, and when starting a pass while another is
 running is either refused with a reason or genuinely supported — not left to
 chance.
 
-### A frame shot in crop mode is refused without a reason
+### Confirm a crop-mode frame against a real one
 
-The decoder panics on its own bounds check when a frame's crop area runs past
-its active area, which is what an R5 Mark II in crop mode produces — and what a
-compressed X-T2 RAF produces, for the same reason. The panic used to be caught
-by the plugin ABI; the plugins are gone and `Formats::open` catches it now, so
-the outcome is unchanged: the process lives and the frame lands in the rejected
-list. What it lands there with is a panic message, which tells the user nothing
-they can act on and does not say the frame was shot in a mode this program
-cannot yet read.
+The handling is written; what is missing is a file to run it against, and the
+rule here is that a decode path is not claimed to work until it has been.
 
-That last part got heavier when the decoder was widened to whatever rawler
-reads. CLAUDE.md now rests the whole guarantee on it: the program claims only
-that rawler offers to read a file, and what it owes in return is a sentence
-saying why one could not be read. A relayed panic is not that sentence, and
-there are now 29 extensions’ worth of ways to reach it.
+What was found on the way is the part worth keeping. `rawler` builds the active
+and crop rectangles by subtracting camera-database borders from the frame's own
+size, and a body in a crop mode writes a frame smaller than the database
+describes. This entry used to say the subtraction panics and the frame lands in
+the rejected list. That is true of a debug build only. A release build — the one
+that ships — wraps instead, and hands over a rectangle about 1.8e19 pixels wide
+with no error anywhere, which is a worse failure than the one that was written
+down. ARCHITECTURE.md carries the measurement.
 
-Not reproduced here — there is no crop-mode frame in the test data — and taken
-from the sibling star-trails project, where the same decoder at the same version
-was measured against it. That project reads such a frame rather than refusing
-it: it takes the size the decoder's own probe promises and fills it from the
-whole sensor, with the crop rules in one pure function that has a test per case.
-Worth reading before starting, since it is the same library and the same bodies.
+Both paths are now handled and tested: the absurd rectangle is refused and the
+whole frame used instead, which is the right geometry here because this program
+deposits photosites rather than cropping, and the panic that a debug build still
+raises is translated into a sentence naming crop mode rather than relayed as
+`assertion failed: p1.x <= p2.x`.
 
-Two ways out, and which one is right is the thing to decide: refuse the frame
-with a sentence naming crop mode, which is honest and cheap, or read it, which
-is what the owner's own frames will eventually want. The first is not wasted
-work if the second follows, because a frame that cannot be read still has to say
-why.
+None of that has met an actual crop-mode frame. The cheapest way to close it is
+one exposure from the R5 Mark II in crop mode, lens cap on, dropped into
+`testdata/`; the test that exists would then be pointed at it. Failing that,
+raw.pixls.us publishes sample files per body, including the compressed X-T2 RAF
+that fails the same way.
 
-Done when such a frame either reads, or is refused with a reason that names what
-is wrong with it rather than repeating what the decoder said as it fell over.
+Done when such a frame has been read here, its reported geometry checked against
+what the camera actually wrote, and the test in `astro-format-raw` runs against
+it rather than against synthetic numbers.
 
 ## The window
 

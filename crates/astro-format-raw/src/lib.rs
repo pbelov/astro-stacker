@@ -16,6 +16,7 @@
 
 mod datetime;
 
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -119,15 +120,13 @@ impl RawFrame {
         // Metadata first: the orientation in the layout has to come from EXIF,
         // because rawler does not carry it on the decoded image (see
         // `exif_orientation`).
-        let metadata = decoder
-            .raw_metadata(&source, &RawDecodeParams::default())
+        let metadata = contained(|| decoder.raw_metadata(&source, &RawDecodeParams::default()))?
             .map_err(|err| Unreadable::parse(err.to_string()))?;
 
         // `dummy` builds the full description — dimensions, CFA, levels — while
         // skipping the expensive pixel decompression. Opening a frame stays
         // cheap, which matters when a session holds hundreds of them.
-        let described = decoder
-            .raw_image(&source, &RawDecodeParams::default(), true)
+        let described = contained(|| decoder.raw_image(&source, &RawDecodeParams::default(), true))?
             .map_err(|err| Unreadable::parse(err.to_string()))?;
 
         let layout = layout_from(&described, &metadata)?;
@@ -145,8 +144,7 @@ impl RawFrame {
             .decoder
             .lock()
             .map_err(|_| Unreadable::internal("decoder lock was poisoned by an earlier panic"))?;
-        let image = decoder
-            .raw_image(&self.source, &RawDecodeParams::default(), false)
+        let image = contained(|| decoder.raw_image(&self.source, &RawDecodeParams::default(), false))?
             .map_err(|err| Unreadable::parse(err.to_string()))?;
 
         let RawImageData::Integer(data) = image.data else {
@@ -318,24 +316,85 @@ fn copy_active_area(raw: &RawImage, layout: &mut ImageLayout) {
     // `crop_area` is the manufacturer's recommended crop; `active_area` is
     // everything that saw light. Astro work wants the latter, because the
     // masked border is what calibrates the black level.
-    let area = raw.active_area.or(raw.crop_area);
-    let Some(area) = area else {
-        layout.active_width = layout.width;
-        layout.active_height = layout.height;
-        return;
+    let area = raw.active_area.or(raw.crop_area).map(|area| (area.p.x, area.p.y, area.d.w, area.d.h));
+    let (x, y, width, height) = active_area(area, layout.width, layout.height);
+    layout.active_x = x;
+    layout.active_y = y;
+    layout.active_width = width;
+    layout.active_height = height;
+}
+
+/// The light-sensitive region, or the whole frame when what the decoder reports
+/// cannot be believed.
+///
+/// It has to be checked rather than trusted, and the reason is specific.
+/// rawler builds these rectangles by subtracting camera-database borders from
+/// the frame's own size, and the database describes the whole sensor. A body
+/// shooting in a crop mode writes a smaller frame, the subtraction runs past
+/// zero, and what it does then depends on the build: measured against rawler
+/// 0.7.2, a debug build panics on the overflow, while a release build — the one
+/// that ships — wraps and hands over a rectangle about 1.8e19 wide, with no
+/// error anywhere. Arriving at the whole frame is right in both cases. We
+/// deposit photosites rather than crop, so the only thing the active area
+/// decides is which pixels count as optically black, and a frame shot in crop
+/// mode has no masked border to find.
+///
+/// The checks widen to `u64` first: on a 64-bit target the wrapped value is
+/// close enough to `usize::MAX` that adding the offset to it wraps a second
+/// time, and the comparison would pass.
+fn active_area(area: Option<(usize, usize, usize, usize)>, width: u32, height: u32) -> (u32, u32, u32, u32) {
+    let whole = (0, 0, width, height);
+    let Some((x, y, area_width, area_height)) = area else {
+        return whole;
     };
 
-    let fits = area.p.x + area.d.w <= raw.width && area.p.y + area.d.h <= raw.height;
-    if !fits || area.d.w == 0 || area.d.h == 0 {
-        layout.active_width = layout.width;
-        layout.active_height = layout.height;
-        return;
+    let fits = |start: usize, span: usize, limit: u32| {
+        span > 0 && (start as u64).checked_add(span as u64).is_some_and(|end| end <= u64::from(limit))
+    };
+    if !fits(x, area_width, width) || !fits(y, area_height, height) {
+        return whole;
     }
 
-    layout.active_x = area.p.x as u32;
-    layout.active_y = area.p.y as u32;
-    layout.active_width = area.d.w as u32;
-    layout.active_height = area.d.h as u32;
+    // Each is at most its limit, and the limits are `u32`.
+    (x as u32, y as u32, area_width as u32, area_height as u32)
+}
+
+/// Runs a step of rawler's, turning a panic inside it into an `Unreadable`.
+///
+/// The registry catches decoder panics too, but as a last resort and with
+/// nothing to say beyond what the panic said. Catching here, where the step is
+/// known, is what makes a sentence possible.
+///
+/// `AssertUnwindSafe` is honest because nothing the call touched is read after
+/// a panic: the value never materialises, and a half-written destination buffer
+/// leaves with the error.
+fn contained<T>(call: impl FnOnce() -> T) -> Result<T, Unreadable> {
+    std::panic::catch_unwind(AssertUnwindSafe(call)).map_err(|panic| {
+        let said = panic
+            .downcast_ref::<&str>()
+            .map(|said| (*said).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_owned());
+        Unreadable::parse(why_it_fell(&said))
+    })
+}
+
+/// What to tell the user when the decoder falls over, which for one cause is
+/// more than the panic itself says.
+///
+/// Relaying `assertion failed: p1.x <= p2.x` asks the user to debug a library
+/// they did not install. The assertion has a known cause worth naming instead,
+/// and it is the same one `active_area` guards against.
+fn why_it_fell(said: &str) -> String {
+    let geometry = said.contains("attempt to subtract with overflow")
+        || said.contains("p1.x <= p2.x")
+        || said.contains("p1.y <= p2.y");
+    if geometry {
+        "the frame is smaller than the decoder's camera database expects, which is what a body          shooting in a crop mode produces; this file cannot be read yet"
+            .to_owned()
+    } else {
+        format!("the decoder fell over: {said}")
+    }
 }
 
 /// Reads orientation from EXIF rather than from the decoded image.
@@ -411,6 +470,71 @@ fn positive_rational(value: Rational) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// One case per way the active area can be wrong, because the numbers come
+    /// from arithmetic that runs past zero rather than from a file.
+    #[test]
+    fn the_active_area_is_the_whole_frame_whenever_it_cannot_be_believed() {
+        // Nothing reported.
+        assert_eq!(active_area(None, 6000, 4000), (0, 0, 6000, 4000));
+        // An ordinary frame: kept as it is.
+        assert_eq!(active_area(Some((144, 60, 5800, 3900)), 6000, 4000), (144, 60, 5800, 3900));
+        // Exactly filling the frame is still believable.
+        assert_eq!(active_area(Some((0, 0, 6000, 4000)), 6000, 4000), (0, 0, 6000, 4000));
+        // An empty span says nothing about where the light fell.
+        assert_eq!(active_area(Some((0, 0, 0, 4000)), 6000, 4000), (0, 0, 6000, 4000));
+        // Reaching past the frame by one pixel.
+        assert_eq!(active_area(Some((1, 0, 6000, 4000)), 6000, 4000), (0, 0, 6000, 4000));
+
+        // What a crop-mode frame actually produces, measured from rawler 0.7.2
+        // in a release build: 5568 - 6000 wrapped, and no error anywhere.
+        let wrapped = 5568usize.wrapping_sub(6000);
+        assert_eq!(active_area(Some((0, 0, wrapped, 1774)), 5568, 3712), (0, 0, 5568, 3712));
+        // And with an offset large enough to carry the sum past the end and
+        // back to a small number — the case that defeats a check done in
+        // `usize`, because the area would then have looked as though it fitted.
+        assert_eq!(500usize.wrapping_add(wrapped), 68);
+        assert_eq!(active_area(Some((500, 60, wrapped, 1774)), 5568, 3712), (0, 0, 5568, 3712));
+    }
+
+    /// The assertion rawler raises is not something a user can act on, and the
+    /// cause is known. This calls rawler's own arithmetic rather than a copy of
+    /// its message, so the day that message changes the test says so.
+    #[test]
+    fn a_frame_smaller_than_the_database_expects_is_named_not_relayed() {
+        use rawler::imgop::{Dim2, Rect};
+
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        // Borders measured against a full sensor, applied to the smaller frame
+        // a body in a crop mode writes. This shape falls over in both profiles;
+        // the plain overshoot only does in a debug build.
+        let fell = std::panic::catch_unwind(|| {
+            Rect::new_with_borders(Dim2::new(5568, 3712), &[3000, 60, 3000, 80])
+        });
+        std::panic::set_hook(hook);
+
+        let panic = fell.expect_err("rawler still refuses borders wider than the frame");
+        let said = panic
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| panic.downcast_ref::<&str>().map(|said| (*said).to_owned()))
+            .expect("a panic carries a message");
+
+        let told = why_it_fell(&said);
+        assert!(told.contains("crop mode"), "{said} -> {told}");
+        assert!(!told.contains("p1."), "the assertion must not reach the user: {told}");
+    }
+
+    /// Anything else is still passed on: a cause we have not met is better
+    /// reported verbatim than described wrongly.
+    #[test]
+    fn an_unfamiliar_panic_is_repeated_rather_than_explained() {
+        let told = why_it_fell("index out of bounds: the len is 3 but the index is 7");
+        assert!(told.contains("index out of bounds"), "{told}");
+        assert!(!told.contains("crop mode"), "{told}");
+    }
 
     /// Frames from the owner's bodies, one file per camera. Gitignored, so the
     /// test says nothing rather than failing on a machine without them.

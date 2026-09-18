@@ -449,6 +449,38 @@ makes 15.8 billion of them, and the threads fought over one cache line for
 twenty times longer than the work itself took. They are counted per band and
 added once.
 
+### What a decoder reports is checked, never trusted
+
+Numbers that arrive from a decoder describe a file written by a camera nobody
+here owns, parsed by a library against a database of cameras. Each of those is
+a place where a number can be wrong, and the wrong number is not always a large
+one that announces itself.
+
+The case that settled this is worth keeping, because it is the opposite of what
+it looked like. `rawler` builds the active and crop rectangles by subtracting
+camera-database borders from the frame's own size, and the database describes
+the whole sensor. A body shooting in a crop mode writes a smaller frame, so the
+subtraction runs past zero. Measured against rawler 0.7.2 with its own
+`Rect::new_with_borders`:
+
+* a **debug** build panics — `attempt to subtract with overflow`;
+* a **release** build, which is what ships, wraps: it returns a rectangle about
+  1.8e19 pixels wide, with no panic, no error, and nothing in any log.
+
+So the failure everyone had written down — a panic, a rejected frame — was the
+one that never reaches a user. What reaches a user is a silently absurd number.
+And a bounds check written the obvious way does not catch it: the reported width
+is close enough to `usize::MAX` that adding the frame's own offset to it wraps a
+second time, back to a small number that passes. `active_area` in
+`astro-format-raw` widens to `u64` and uses `checked_add` for exactly that
+reason, and falls back to the whole frame whenever the answer cannot be
+believed — which is the right answer here anyway, since this program deposits
+photosites rather than cropping.
+
+Where a panic does still come through, it is caught where the step is known and
+translated: `assertion failed: p1.x <= p2.x` asks the user to debug a library
+they did not install, and the same arithmetic in a sentence does not.
+
 ### The program is called AstroAccretion, and its mark is a pinwheel galaxy
 
 `astro-stacker` names the category, not the program, and it stays only as the
