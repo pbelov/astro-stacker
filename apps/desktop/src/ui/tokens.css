@@ -193,12 +193,22 @@ tr:last-child td {
   margin: 0;
 }
 
-button.primary {
+/* Кнопка в приложении одна, и primary с ghost различаются тем, насколько
+   громко зовут нажать, а не размером. Раньше ghost был мельче: в «Качестве»
+   один и тот же элемент меняет класс по состоянию и оттого прыгал в размере,
+   а в «О программе» три кнопки стояли рядом тремя разными ростами. */
+button.primary,
+button.ghost {
   font: inherit;
+  font-size: 13px;
+  line-height: 1.25;
   cursor: pointer;
-  padding: 7px 16px;
+  padding: 7px 14px;
   border-radius: 8px;
-  border: 1px solid var(--accent);
+  border: 1px solid transparent;
+}
+button.primary {
+  border-color: var(--accent);
   background: var(--accent);
   color: var(--accent-contrast);
   font-weight: 600;
@@ -211,13 +221,7 @@ button.primary:disabled {
   cursor: default;
 }
 button.ghost {
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-  padding: 5px 8px;
-  border-radius: 7px;
-  border: 1px solid var(--line);
+  border-color: var(--line);
   background: none;
   color: var(--muted);
 }

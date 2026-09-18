@@ -587,22 +587,25 @@
       {#if formats.length > 0}
         <p class="muted">{i18n.t("formatsRead", { list: formats.join(", ") })}</p>
       {/if}
-      {#if logPath}
-        <p class="muted log">
-          <span class="num" title={logPath}>{i18n.t("logKept")}</span>
-          <button class="ghost" onclick={() => void revealItemInDir(logPath)}>
-            {i18n.t("showLog")}
-          </button>
-        </p>
-      {/if}
       <!-- Само приложение под двойной лицензией, а сторонние компоненты — в
            тексте, вшитом в бинарник. Среди них rawler под LGPL-2.1, и её
            условие «приложить копию лицензии» закрывается именно этим. -->
-      <p class="muted log">
-        <span>{i18n.t("aboutLicense")}</span>
+      <p class="muted">{i18n.t("aboutLicense")}</p>
+      <!-- Лог слева и отдельно от остальных: это отладочная дверца, которая
+           когда-то уйдёт, а не действие диалога. -->
+      <div class="modalfoot">
+        {#if logPath}
+          <button
+            class="ghost logs"
+            title={logPath}
+            onclick={() => void revealItemInDir(logPath)}
+          >
+            {i18n.t("logs")}
+          </button>
+        {/if}
         <button class="ghost" onclick={() => void showNotices()}>{i18n.t("aboutNotices")}</button>
-      </p>
-      <button class="primary" onclick={() => (aboutOpen = false)}>{i18n.t("close")}</button>
+        <button class="primary" onclick={() => (aboutOpen = false)}>{i18n.t("close")}</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -802,17 +805,21 @@
     flex-direction: column;
     gap: 8px;
   }
-  /* Строка про лог держит кнопку рядом с текстом, а не внизу справа, где
-     стоит «Закрыть»: это не второе действие диалога. */
-  .log {
+  /* Ряд действий диалога. Отладочный лог отжат влево, чтобы не читаться
+     вторым действием рядом с «Закрыть». */
+  .modalfoot {
     display: flex;
-    align-items: baseline;
+    justify-content: flex-end;
+    align-items: center;
     gap: 8px;
+    margin-top: 12px;
   }
-  .log button {
-    align-self: baseline;
+  .modalfoot .logs {
+    margin-right: auto;
+  }
+  .modalfoot button {
+    align-self: auto;
     margin-top: 0;
-    flex: none;
   }
   /* Список компонентов длинный по существу: сотни пакетов и тексты лицензий.
      Окно под него шире и выше обычного, а прокручивается сам текст. */

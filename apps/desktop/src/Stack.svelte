@@ -582,10 +582,13 @@
     white-space: nowrap;
     font-size: 12px;
   }
+  /* Ширина задана в 2em, поэтому боковые отступы общей кнопки сюда не
+     помещаются: содержимое - один знак. */
   .drop {
     width: 2em;
     flex: none;
     line-height: 1;
+    padding-inline: 0;
   }
   .drop:disabled {
     opacity: 0.3;
