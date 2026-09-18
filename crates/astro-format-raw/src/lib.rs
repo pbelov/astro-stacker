@@ -390,8 +390,14 @@ fn why_it_fell(said: &str) -> String {
         || said.contains("p1.x <= p2.x")
         || said.contains("p1.y <= p2.y");
     if geometry {
-        "the frame is smaller than the decoder's camera database expects, which is what a body          shooting in a crop mode produces; this file cannot be read yet"
-            .to_owned()
+        // `concat!` rather than a backslash continuation: the continuation is
+        // one edit away from collapsing into a run of spaces inside the
+        // sentence, which is what happened when this was first written.
+        concat!(
+            "the frame is smaller than the decoder's camera database expects, which is what a ",
+            "body shooting in a crop mode produces; this file cannot be read yet",
+        )
+        .to_owned()
     } else {
         format!("the decoder fell over: {said}")
     }
@@ -525,6 +531,9 @@ mod tests {
         let told = why_it_fell(&said);
         assert!(told.contains("crop mode"), "{said} -> {told}");
         assert!(!told.contains("p1."), "the assertion must not reach the user: {told}");
+        // A sentence shown to a user, so it has to read like one: the first
+        // version of it carried ten spaces where a line break had collapsed.
+        assert!(!told.contains("  "), "doubled spaces in a sentence: {told}");
     }
 
     /// Anything else is still passed on: a cause we have not met is better
@@ -536,12 +545,17 @@ mod tests {
         assert!(!told.contains("crop mode"), "{told}");
     }
 
-    /// Frames from the owner's bodies, one file per camera. Gitignored, so the
-    /// test says nothing rather than failing on a machine without them.
-    fn real_frames() -> Vec<std::path::PathBuf> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
-        let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
-        entries
+    fn testdata() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata")
+    }
+
+    /// Raw files directly inside `dir`. Gitignored, so a test that needs them
+    /// says nothing rather than failing on a machine without them.
+    fn frames_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut found: Vec<std::path::PathBuf> = entries
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| {
                 path.extension().is_some_and(|extension| {
@@ -549,7 +563,68 @@ mod tests {
                     extension == "cr2" || extension == "cr3"
                 })
             })
-            .collect()
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Frames from the owner's bodies, one file per camera.
+    fn real_frames() -> Vec<std::path::PathBuf> {
+        frames_in(&testdata())
+    }
+
+    fn open_layout(path: &std::path::Path) -> ImageLayout {
+        let frame = Raw::new().open(path).unwrap_or_else(|why| panic!("{}: {why}", path.display()));
+        *frame.layout()
+    }
+
+    /// The frame this entry was written about: an R5 Mark II in its 1.6x crop
+    /// mode, which the sibling project measured the same decoder falling over
+    /// on. On this path it reads, and these numbers are the camera's rather
+    /// than merely plausible ones — the masked border is the same width as in a
+    /// full-frame file from the same body, because the optically black columns
+    /// are a property of the sensor and do not shrink with the crop.
+    #[test]
+    fn a_crop_mode_frame_reads_with_the_cameras_own_geometry() {
+        let Some(path) = frames_in(&testdata().join("crop")).pop() else {
+            return;
+        };
+        let full_path = testdata().join("CanonR5m2.CR3");
+        if !full_path.exists() {
+            return;
+        }
+
+        assert_eq!(Raw::new().probe(&path, &[]), PROBE_CERTAIN, "{}", path.display());
+        let crop = open_layout(&path);
+        let full = open_layout(&full_path);
+
+        assert!(crop.width < full.width && crop.height < full.height, "{crop:?}");
+
+        // The active area is inside the frame and is not the whole of it: were
+        // the numbers unbelievable, `active_area` would have fallen back to the
+        // frame and this is what would say so.
+        assert!(crop.active_width > 0 && crop.active_height > 0, "{crop:?}");
+        assert!(crop.active_x + crop.active_width <= crop.width, "{crop:?}");
+        assert!(crop.active_y + crop.active_height <= crop.height, "{crop:?}");
+        assert!(crop.active_width < crop.width, "fell back to the whole frame: {crop:?}");
+
+        // The same masked border in both, which is what makes the geometry the
+        // sensor's rather than a coincidence that happens to fit.
+        assert_eq!(
+            crop.width - crop.active_width,
+            full.width - full.active_width,
+            "masked columns must not shrink with the crop: {crop:?} against {full:?}",
+        );
+
+        // And the pixels arrive: the crop factor this body crops by is 1.6, and
+        // a decode that produced the wrong count would not reach here at all.
+        let ratio = f64::from(full.active_width) / f64::from(crop.active_width);
+        assert!((1.55..1.65).contains(&ratio), "crop factor {ratio:.3}");
+
+        let frame = Raw::new().open(&path).expect("opens");
+        let mut buffer = vec![0u8; frame.layout().required_bytes().expect("a sane layout")];
+        frame.read_samples(&mut buffer).expect("a crop-mode frame must decode");
+        assert_eq!(buffer.len(), crop.width as usize * crop.height as usize * 2);
     }
 
     /// The probe opens the file instead of reading the header it is handed, and

@@ -52,8 +52,9 @@ from a promise to a requirement on failure:
 
 * **A file that cannot be read must say why in words the user can act on.** That
   is now the whole of the guarantee, and it is where the effort goes. A panic
-  message from inside the decoder is not such a sentence — see BACKLOG.md on the
-  crop-mode frame, which is the shape this failure takes.
+  message from inside the decoder is not such a sentence; ARCHITECTURE.md, under
+  "What a decoder reports is checked, never trusted", is what one looks like and
+  how the numbers behind it were measured.
 * **Do not claim a camera works.** The program claims that rawler offers to read
   the file, which is a different sentence and the only one that is true.
 * **A body the owner shoots stays verified by hand** against real frames, as

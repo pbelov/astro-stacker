@@ -481,6 +481,22 @@ Where a panic does still come through, it is caught where the step is known and
 translated: `assertion failed: p1.x <= p2.x` asks the user to debug a library
 they did not install, and the same arithmetic in a sentence does not.
 
+Then measured against the frame the guard was written for, and the answer is
+that it is not that frame. An R5 Mark II shooting its 1.6x crop mode reads, and
+would have read before any of this: rawler carries a database entry for the
+mode, so its borders fit the smaller frame and the subtraction never runs past
+zero. The geometry that comes back is the camera's rather than merely
+plausible — the masked border is 266 columns wide in both the crop frame and a
+full-frame file from the same body, because optically black columns belong to
+the sensor and do not shrink with the crop, and the two active areas differ by
+1.607x, which is what this body crops by. End to end it groups as a light and
+measures as a capped frame should: median on the black level to the ADU, spread
+of 11 to 13, nothing clipped.
+
+So no real file here has yet made the guard fire. What justifies it is rawler's
+arithmetic measured directly, and the cost of keeping it is two comparisons
+against numbers we have to read anyway.
+
 ### The program is called AstroAccretion, and its mark is a pinwheel galaxy
 
 `astro-stacker` names the category, not the program, and it stays only as the

@@ -190,9 +190,9 @@ impl OpenFrame {
 ///
 /// A decoder is a library's worth of parsing pointed at a file that may be
 /// truncated, mislabelled, or written by a body nobody here owns, and `rawler`
-/// enforces its bounds by panicking — the crop-mode frame in BACKLOG.md is one
-/// such case, and it is reachable with a Canon frame, not only with the wider
-/// net. This used to be caught by the plugin ABI, which could not let a panic
+/// enforces its bounds by panicking over geometry it cannot make sense of —
+/// see ARCHITECTURE.md, "What a decoder reports is checked, never trusted".
+/// This used to be caught by the plugin ABI, which could not let a panic
 /// cross `extern "C"`. The plugins are gone; the catch has to live somewhere,
 /// and this is the one place every decoder call passes through.
 ///

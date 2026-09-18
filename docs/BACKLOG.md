@@ -32,36 +32,6 @@ Done when the sequence runs clean, and when starting a pass while another is
 running is either refused with a reason or genuinely supported — not left to
 chance.
 
-### Confirm a crop-mode frame against a real one
-
-The handling is written; what is missing is a file to run it against, and the
-rule here is that a decode path is not claimed to work until it has been.
-
-What was found on the way is the part worth keeping. `rawler` builds the active
-and crop rectangles by subtracting camera-database borders from the frame's own
-size, and a body in a crop mode writes a frame smaller than the database
-describes. This entry used to say the subtraction panics and the frame lands in
-the rejected list. That is true of a debug build only. A release build — the one
-that ships — wraps instead, and hands over a rectangle about 1.8e19 pixels wide
-with no error anywhere, which is a worse failure than the one that was written
-down. ARCHITECTURE.md carries the measurement.
-
-Both paths are now handled and tested: the absurd rectangle is refused and the
-whole frame used instead, which is the right geometry here because this program
-deposits photosites rather than cropping, and the panic that a debug build still
-raises is translated into a sentence naming crop mode rather than relayed as
-`assertion failed: p1.x <= p2.x`.
-
-None of that has met an actual crop-mode frame. The cheapest way to close it is
-one exposure from the R5 Mark II in crop mode, lens cap on, dropped into
-`testdata/`; the test that exists would then be pointed at it. Failing that,
-raw.pixls.us publishes sample files per body, including the compressed X-T2 RAF
-that fails the same way.
-
-Done when such a frame has been read here, its reported geometry checked against
-what the camera actually wrote, and the test in `astro-format-raw` runs against
-it rather than against synthetic numbers.
-
 ## The window
 
 ### Rework the layout: controls on the left, results on the right, nothing scrolling
