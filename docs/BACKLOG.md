@@ -205,6 +205,62 @@ worth stacking are a hand-picked subset is not an exception.
 Done when the five cards together take about half the height they do now, and
 when choosing files is not visibly the lesser of the two ways in.
 
+### Stack first, decide what to keep afterwards
+
+Today the stacking step refuses to start until at least one output file has been
+named. The order is backwards: naming three files is a decision about what to
+keep, and it is being asked before there is anything to keep or any way to tell
+whether it is worth keeping. What should happen is that the run starts on the
+frames alone, and when it ends the result appears — on a step of its own — with
+a button per output offering to save it.
+
+**This reverses a refusal that was put in on purpose**, and the reason is in the
+code beside it: a stack of a few hundred frames is minutes of work, and finding
+out at the end that it was written nowhere is the worst moment to be told. The
+new shape answers that better than the refusal did, but only if it holds to one
+rule — **the result stays in memory after the run, and the buttons write from
+it**. If saving re-runs anything, the refusal was right and this is worse.
+
+The code is already most of the way there, which is worth knowing before
+estimating this:
+
+* `combine` returns `Stacked` — the planes, in memory. `write` is already a
+  separate function taking that plus the chosen paths.
+* `write` already builds each output only when it is asked for: the linear TIFF
+  costs another pass over every pixel and a run that wants only the FITS does
+  not pay for it. That is exactly the behaviour three buttons want.
+* The preview is already kept on `Running` and already comes from the same
+  levelled copy the stretched TIFF does, so the window and the file agree.
+
+What has to change is where the result lives between the run and the button.
+`write` takes `&Selection<'_>`, which borrows from the survey, so it cannot be
+parked in `Running` as it is. What it actually uses from there is small — the
+first frame's camera model, exposure, ISO and layout — so lifting those into an
+owned header struct dissolves the borrow rather than fighting it.
+
+The cost is memory, and it should be stated rather than discovered: `Stacked`
+holds one `f32` plane per colour plus one coverage plane per colour, so a 45
+megapixel stack is about 540 MB of planes and as much again of coverage. Worth
+checking whether coverage is needed once the run has finished — if it is not,
+dropping it halves what is held.
+
+When it is dropped follows the precedent already set by the held masters of a
+stopped measurement: the moment it cannot serve. A new run, or a change to what
+is being stacked, and it goes. Saving must not drop it — FITS now and the view
+TIFF five minutes later is an ordinary thing to want. And since what is held is
+minutes of work, throwing it away deserves to be said out loud: closing the
+window or starting another run with a result unsaved should ask.
+
+The step itself is a fourth: frames, quality, stacking, result. That collides
+with the layout rework, which leaves open whether two of the existing steps
+merge, so the two entries want designing together rather than in sequence.
+
+Done when a stack can be started with nothing named, when the result appears on
+its own step with what it is made of, when each of the three files can be
+written from it afterwards in any order and more than once, when nothing is
+recomputed except the output being written, and when an unsaved result is not
+lost silently.
+
 ### Name the frames that are not lights, and offer to refile them
 
 A dark or a flat filed among the lights survives the whole run today. The
