@@ -329,15 +329,66 @@ pub struct CoverageDto {
     pub thinnest: f64,
 }
 
+const READING: &str = "reading frames";
+const STACKING: &str = "stacking";
+
+/// What the log and a refusal call a measurement. One function, because two
+/// spellings of one pass read in the log as two passes.
+fn measuring(resume: bool) -> &'static str {
+    if resume { "continuing quality" } else { "measuring quality" }
+}
+
 /// Set while a pass runs, cleared when it ends.
 #[derive(Default)]
 pub struct Running {
     cancel: Arc<AtomicBool>,
+    /// Which pass owns the run, if any.
+    ///
+    /// One at a time is a decision rather than a limitation. Two passes of a
+    /// few hundred frames are each sized for every core, so run together they
+    /// finish later than run in turn. And before this they shared the one stop
+    /// flag below: each stored `false` into it as it started, so the second
+    /// pass un-cancelled the first and a later Stop reached both.
+    inflight: std::sync::Mutex<Option<&'static str>>,
     /// The last preview rendered, kept so the window can fetch its pixels as
     /// bytes rather than as a JSON array of numbers.
     preview: std::sync::Mutex<Vec<u8>>,
     /// A measurement stopped part way through, kept so it can be continued.
     held: std::sync::Mutex<Option<Stopped>>,
+}
+
+/// The right to run, held for exactly as long as the pass is.
+///
+/// A guard rather than a flag set and cleared by hand, for the same reason
+/// [`journal::Pass`] is one: the endings that matter are the early return, the
+/// `?` and the panic, and only `Drop` reaches all three.
+struct Claim<'a> {
+    inflight: &'a std::sync::Mutex<Option<&'static str>>,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        let mut slot = self.inflight.lock().unwrap_or_else(|held| held.into_inner());
+        *slot = None;
+    }
+}
+
+impl Running {
+    /// Claims the run, or says what is in the way.
+    ///
+    /// Clearing the stop flag belongs here and nowhere else: it may be cleared
+    /// only by whoever has just taken the run. A refused claim leaves it alone,
+    /// which is the whole point — a second pass starting must not un-cancel the
+    /// first.
+    fn claim(&self, name: &'static str) -> Result<Claim<'_>, String> {
+        let mut slot = self.inflight.lock().unwrap_or_else(|held| held.into_inner());
+        if let Some(busy) = *slot {
+            return Err(format!("{busy} is already running; stop it before starting {name}"));
+        }
+        *slot = Some(name);
+        self.cancel.store(false, Ordering::Relaxed);
+        Ok(Claim { inflight: &self.inflight })
+    }
 }
 
 /// What a stopped measurement needs in order to carry on.
@@ -380,8 +431,11 @@ fn load_formats() -> Result<Formats, String> {
 
 
 #[tauri::command]
-fn scan_session(roots: Roots) -> Result<SessionDto, String> {
-    journal::pass("reading frames", || read_session(roots))
+fn scan_session(roots: Roots, state: State<'_, Running>) -> Result<SessionDto, String> {
+    journal::pass(READING, || {
+        let _claim = state.claim(READING)?;
+        read_session(roots)
+    })
 }
 
 fn read_session(roots: Roots) -> Result<SessionDto, String> {
@@ -428,7 +482,7 @@ async fn measure_quality(
     state: State<'_, Running>,
 ) -> Result<QualityDto, String> {
     journal::pass_async(
-        if resume { "continuing quality" } else { "measuring quality" },
+        measuring(resume),
         measure(roots, sigma, max_stars, raw, resume, on, state),
     )
     .await
@@ -444,12 +498,12 @@ async fn measure(
     on: Channel<Progress>,
     state: State<'_, Running>,
 ) -> Result<QualityDto, String> {
+    let _claim = state.claim(measuring(resume))?;
     let rules = roots.rules();
     if rules.is_empty() {
         return Err("nothing to measure".to_owned());
     }
     let cancel = state.cancel.clone();
-    cancel.store(false, Ordering::Relaxed);
 
     // Debug rather than a hand-written key: what identifies a run is every
     // field of these, and a key listing them by hand would go stale the first
@@ -712,7 +766,7 @@ async fn stack_run(
     state: State<'_, Running>,
 ) -> Result<StackResultDto, String> {
     journal::pass_async(
-        "stacking",
+        STACKING,
         stack(
             roots, sigma, max_stars, raw, sharpness, max_trail, max_fwhm, max_shift, pixfrac,
             reject, kappa, out, on, state,
@@ -738,6 +792,7 @@ async fn stack(
     on: Channel<Progress>,
     state: State<'_, Running>,
 ) -> Result<StackResultDto, String> {
+    let _claim = state.claim(STACKING)?;
     let rules = roots.rules();
     if rules.is_empty() {
         return Err("nothing to stack".to_owned());
@@ -749,7 +804,6 @@ async fn stack(
         return Err("no result file was named".to_owned());
     }
     let cancel = state.cancel.clone();
-    cancel.store(false, Ordering::Relaxed);
     let stopped = || cancel.load(Ordering::Relaxed);
 
     let host = host()?;
@@ -1332,7 +1386,7 @@ mod tests {
             dark_flats: Vec::new(),
         };
 
-        let dto = scan_session(roots).expect("the session scans");
+        let dto = read_session(roots).expect("the session scans");
         assert!(dto.frames > 200, "the reference session is deep: {}", dto.frames);
         assert!(!dto.sets.is_empty(), "it partitions into sets");
         assert!(!dto.plans.is_empty(), "and at least one is stackable");
@@ -1643,11 +1697,58 @@ mod tests {
         assert_eq!(paths, wanted.iter().map(|p| p.as_path()).collect::<Vec<_>>(), "in run order");
     }
 
+
+    /// Two passes at once was reachable in two clicks: start a measurement,
+    /// switch to stacking, press the button. Nothing refused it.
+    #[test]
+    fn a_second_pass_is_refused_and_names_what_is_in_the_way() {
+        let running = Running::default();
+        let first = running.claim(measuring(false)).expect("the first claim takes the run");
+
+        let Err(refused) = running.claim(STACKING) else {
+            panic!("a second pass must not be given the run");
+        };
+        assert!(refused.contains(measuring(false)), "{refused}");
+        assert!(refused.contains(STACKING), "{refused}");
+
+        drop(first);
+        assert!(running.claim(STACKING).is_ok(), "released when the first pass ended");
+    }
+
+    /// The defect underneath the symptom: clearing the stop flag used to be the
+    /// first thing every command did, so a pass starting on top of another
+    /// un-cancelled it and Stop then reached whichever was listening.
+    #[test]
+    fn a_refused_claim_leaves_the_stop_flag_alone() {
+        let running = Running::default();
+        let _first = running.claim(measuring(false)).expect("takes the run");
+        running.cancel.store(true, Ordering::Relaxed);
+
+        assert!(running.claim(STACKING).is_err());
+        assert!(
+            running.cancel.load(Ordering::Relaxed),
+            "a refused pass must not un-cancel the one that is running",
+        );
+    }
+
+    /// And the other half of the same rule: whoever does take the run starts
+    /// uncancelled, however the pass before it ended.
+    #[test]
+    fn taking_the_run_clears_a_stop_left_behind() {
+        let running = Running::default();
+        let first = running.claim(READING).expect("takes the run");
+        running.cancel.store(true, Ordering::Relaxed);
+        drop(first);
+
+        let _second = running.claim(STACKING).expect("free again");
+        assert!(!running.cancel.load(Ordering::Relaxed), "a new pass starts uncancelled");
+    }
+
     #[test]
     fn a_scan_of_nothing_says_so_rather_than_returning_an_empty_session() {
         // An empty session on screen is indistinguishable from a session whose
         // frames were all unreadable, and the user would go looking at their
         // files rather than at what they picked.
-        assert!(scan_session(Roots::default()).is_err());
+        assert!(read_session(Roots::default()).is_err());
     }
 }

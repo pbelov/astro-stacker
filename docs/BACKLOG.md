@@ -8,44 +8,6 @@ rediscovering why it was written down.
 
 ## Defects
 
-### Two passes can run at once, sharing one stop flag
-
-The crash this entry was opened for is gone, and gone for a reason rather than
-by chance. The window built a fresh plugin host for every command and a host
-unloaded its libraries when dropped, while the decoder's work-stealing pool
-parks its workers inside that library between frames — so each command mapped
-the library, started threads in it, and unmapped it under them. The reported
-sequence, measure then read the frames again then measure, is three of those
-cycles, which is why it took that much churn to show. Fixed in 4d63e45, and
-then made impossible in bae6569: a format is a crate now, and there is no
-library to unload. ARCHITECTURE.md carries the full account under the plugin
-reversal. The owner no longer sees it.
-
-What the entry also asked for is still undone, and it is reachable in two
-clicks: start a measurement on the quality step, switch to stacking, press the
-button. Nothing refuses it. `Stack.svelte` keeps its own `running` and knows
-nothing of `measurement.svelte.ts`, so the button is live; and on the Rust side
-neither command checks whether another is in flight. What they share is one
-`cancel: Arc<AtomicBool>` on `Running`, and each stores `false` into it as it
-starts — so the second pass un-cancels the first, and Stop afterwards reaches
-both. The passes also fight over the same cores, each sized for having them
-all. `apps/desktop/src-tauri/src/lib.rs`.
-
-`journal::Pass` already counts passes in flight and logs a warning when one
-starts inside another, which is how this would be noticed after the fact. A
-warning is not a guard.
-
-Refusing is the answer rather than supporting it: two passes of a few hundred
-frames each want every core, and running them together makes both slower than
-running them in turn. What it needs is a claim taken at the start of a pass and
-released when it ends however it ends, and a message naming what is already
-running.
-
-Done when starting a pass while another is running is refused with a sentence
-saying which one is in the way, when the refusal comes from the Rust side
-rather than from a disabled button, and when Stop still stops exactly the pass
-that is running.
-
 ### A calibration frame is decoded twice and nothing says it is the same frame
 
 `combine_streaming` in `crates/astro-core/src/calibrate/combine.rs` reads every
@@ -112,6 +74,15 @@ layout gives for free, and which is why the cards' ad-hoc `max-height` limits �
 `.scroll` in `Quality.svelte`, `.paths` in `DropZone.svelte` — go away rather
 than multiply. If that reading is wrong, it is the thing to correct before any
 of this is built.
+
+One thing to pick up while the steps are being rearranged: no step knows what
+another is doing. `Stack.svelte` keeps its own `running` and `Quality.svelte`
+reads `measurement`, so each button is live while the other step is busy. The
+Rust side refuses the second pass now and says what is in the way, so nothing
+breaks — but the window still invites a click it knows will fail, and fixing
+only one direction would be worse than neither. What it wants is one place
+saying which pass is running, which is a question about how the steps share
+state and therefore belongs here.
 
 Done when the window has no scrollbar of its own at any size it can be opened
 at, when every control is on the left and nothing on the right is a control, and
