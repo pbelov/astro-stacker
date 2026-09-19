@@ -117,6 +117,34 @@ Done when the window has no scrollbar of its own at any size it can be opened
 at, when every control is on the left and nothing on the right is a control, and
 when narrowing the window rearranges rather than clips.
 
+### Paths are shown with whichever slashes they happened to arrive with
+
+The three result files sit in one column under "Where to save", and the column
+shows two conventions at once: a path the save dialog returned keeps Windows
+backslashes, while a path the window proposed carries a forward slash where it
+was joined. Nothing is broken by it — Windows takes either — but three lines of
+the same kind of thing should not look like they came from two programs.
+
+The cause is a hardcoded separator in two places in `Stack.svelte`: `propose`
+builds the names the user did not pick as `${folder}/${name}${suffix}`, and
+`choose` builds the dialog's `defaultPath` the same way, while `folder` comes
+from `folderOf`, which deliberately preserves whatever separators it was given.
+So the moment one file is picked, the other two are proposed as a mixture.
+
+Display and storage are different questions here and both want an answer. What
+is kept should stay exactly as the OS gave it, because it is what gets opened;
+what is shown should be one convention, chosen once. Windows writes backslashes,
+so that is the one to show on Windows.
+
+Worth doing together with the shortening in the same row: `short` cuts a path at
+a fixed number of characters, so it lands mid-segment and produces
+`…ain6\…`. Cutting at a separator instead would drop whole folders and read
+as a path rather than as a string that got clipped.
+
+Done when the three rows show one convention whatever order the files were named
+in, when what is passed to the stacker is still the path the OS gave, and when a
+shortened path begins at a folder boundary.
+
 ### The role cards take more room than they earn, and files are the awkward way in
 
 The five cards for lights, darks, flats, biases and dark-flats are each a
