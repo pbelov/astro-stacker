@@ -8,29 +8,43 @@ rediscovering why it was written down.
 
 ## Defects
 
-### Measuring, rescanning and measuring again crashes the window
+### Two passes can run at once, sharing one stop flag
 
-Reported sequence: choose lights, measure quality, read the frames again, then
-measure quality a second time. Not reproduced yet, and the first step is to
-catch what the crash actually is rather than to guess — a webview reload, a
-panic in the Rust side, or the process going away — because the three point at
-different places.
+The crash this entry was opened for is gone, and gone for a reason rather than
+by chance. The window built a fresh plugin host for every command and a host
+unloaded its libraries when dropped, while the decoder's work-stealing pool
+parks its workers inside that library between frames — so each command mapped
+the library, started threads in it, and unmapped it under them. The reported
+sequence, measure then read the frames again then measure, is three of those
+cycles, which is why it took that much churn to show. Fixed in 4d63e45, and
+then made impossible in bae6569: a format is a crate now, and there is no
+library to unload. ARCHITECTURE.md carries the full account under the plugin
+reversal. The owner no longer sees it.
 
-Half of what made the sequence possible is gone: the window no longer loses
-track of a running measurement, and a second one can no longer be started on
-top of a first. What remains worth suspecting is `Running`, which holds a single
-`cancel: Arc<AtomicBool>` shared by every command and stores `false` into it as
-each one starts — so a measurement and a stack overlapping share one flag, the
-second un-cancels the first, and Stop reaches whichever is listening.
-`apps/desktop/src-tauri/src/lib.rs`.
+What the entry also asked for is still undone, and it is reachable in two
+clicks: start a measurement on the quality step, switch to stacking, press the
+button. Nothing refuses it. `Stack.svelte` keeps its own `running` and knows
+nothing of `measurement.svelte.ts`, so the button is live; and on the Rust side
+neither command checks whether another is in flight. What they share is one
+`cancel: Arc<AtomicBool>` on `Running`, and each stores `false` into it as it
+starts — so the second pass un-cancels the first, and Stop afterwards reaches
+both. The passes also fight over the same cores, each sized for having them
+all. `apps/desktop/src-tauri/src/lib.rs`.
 
-The run is now logged: each command says when it starts and how it ended, and
-passes in flight are counted, so retrying the sequence and reading
-`astro-stacker.log` afterwards is the first step rather than reasoning about it.
+`journal::Pass` already counts passes in flight and logs a warning when one
+starts inside another, which is how this would be noticed after the fact. A
+warning is not a guard.
 
-Done when the sequence runs clean, and when starting a pass while another is
-running is either refused with a reason or genuinely supported — not left to
-chance.
+Refusing is the answer rather than supporting it: two passes of a few hundred
+frames each want every core, and running them together makes both slower than
+running them in turn. What it needs is a claim taken at the start of a pass and
+released when it ends however it ends, and a message naming what is already
+running.
+
+Done when starting a pass while another is running is refused with a sentence
+saying which one is in the way, when the refusal comes from the Rust side
+rather than from a disabled button, and when Stop still stops exactly the pass
+that is running.
 
 ## The window
 
