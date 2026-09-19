@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.25.8"
+version = "0.25.9"
 edition = "2024"
 # Everything but the decoder, which declares its own: rawler's floor is lower
 # than ours and there is no reason to hold the rest of the project back to it.

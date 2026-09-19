@@ -331,6 +331,13 @@ rounding error beside them. Whether those ratios are stable enough to carry one
 figure across the whole run is a question to settle by measuring a real run, not
 by reasoning.
 
+Four stages, not five, if "Stack first, decide what to keep afterwards" lands
+before this: writing leaves the run and becomes a button. That removes the one
+stage whose cost depends on which files were named rather than on how many
+frames there are, so it makes the estimate easier rather than harder. Each save
+then wants its own small figure, and the pass over every pixel a linear TIFF
+costs is the one worth showing.
+
 Done when the stacking step shows a time that does not jump about, when a run
 with rejection is not estimated as though it had one pass, and when `stackSlow`
 is gone.
