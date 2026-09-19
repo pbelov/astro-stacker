@@ -397,6 +397,50 @@ named and the program's own data, and when closing with unsaved work says so.
 
 ## The result
 
+### Say how much light the stack actually holds
+
+Nothing anywhere says it. The result reports how many frames were stacked, how
+many were refused, and an effective count that discounts for uneven weights —
+but never the one number an astrophotographer states first about a night, which
+is how long the shutter was open in total. `scan` does not say it either, so a
+session's worth is not known before minutes are spent on it.
+
+There is a trap in the way: `StackResultDto.seconds` already exists and is the
+wall-clock duration of the run — `started.elapsed()` — not integration time. Two
+fields called seconds, one meaning how long you waited and the other how much
+light you got, will be read wrongly by someone eventually, so the existing one
+wants renaming as part of this.
+
+The reason this is not one number is the reason it is worth doing carefully.
+Four are defensible and they are not equal:
+
+* **Shot** — every light in the set, whatever became of it. What the night cost.
+* **Kept** — the frames that survived selection. The headline, and what "3h 20m"
+  should mean when the window says it.
+* **Effective** — kept, discounted by weight. `effective` already does this for
+  the frame count, with the comment calling it the honest answer to how deep the
+  stack is; the same discount applied to time is the honest answer here.
+* **Per pixel** — and this is the one that stops a single figure being a lie.
+  Frames are deposited after alignment, so field rotation and drift leave the
+  edges covered by fewer frames than the middle. `Stacked.coverage` already
+  carries exactly that, per colour plane. Whatever headline is chosen must not
+  imply the depth is uniform across the frame, because it is not.
+
+Exposure per frame is `read.exposure_seconds` and it is an `Option`: a body that
+recorded nothing leaves a hole. Per this project's rule the sum then is a lower
+bound and has to say so, rather than quietly skipping the frame or inventing a
+value for it.
+
+It belongs in the FITS header too, not only on screen. Other programs read that
+header, and a stack whose total integration has to be recovered by multiplying
+two other keywords is a stack that will be quoted wrongly.
+
+Done when the stacking result states the kept total in a form a person would say
+out loud, when the effective figure sits beside it rather than replacing it,
+when a frame with no recorded exposure makes the total admit it is a floor, when
+the FITS carries it, and when the scan step says what a session holds before it
+is stacked.
+
 ### Quieten the colour grain in the view TIFF, and only there
 
 Frames are combined by depositing photosites rather than by interpolating them.
