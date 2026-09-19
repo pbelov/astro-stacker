@@ -117,6 +117,52 @@ Done when the window has no scrollbar of its own at any size it can be opened
 at, when every control is on the left and nothing on the right is a control, and
 when narrowing the window rearranges rather than clips.
 
+### Stop the window behaving like a browser page
+
+Right-click anywhere and WebView2's own menu appears — Back, Reload, Save as,
+View source. Drag across a label and it selects like text on a page. Press F5
+and the whole thing reloads. None of that belongs in a program that is supposed
+to look like it was written for the desktop, and each one tells the user what is
+under the hood at the moment they least need to know.
+
+Nothing is handled today: there is no `contextmenu` handler, no `keydown`
+handler and no `user-select` rule anywhere in `apps/desktop/src`. Page zoom is
+the exception — `zoomHotkeysEnabled` defaults to false and our config does not
+turn it on — but that covers the keys, not `ctrl`+wheel, so it is worth checking
+rather than assuming.
+
+The sibling star-trails has done this, and two things it learned are worth
+copying rather than rediscovering — `App.svelte`, around the `contextmenu`
+listener:
+
+* **Match on `e.code`, not `e.key`.** WebView2 fires its accelerators by
+  physical key whatever the layout, so on ЙЦУКЕН `ctrl`+A arrives as `ctrl`+«ф»
+  by `e.key` and a handler keyed on the letter simply misses. Their blocked set
+  is physical: `KeyA F G P R S O U J L`, `Equal Minus Digit0` and the numpad
+  three, `F3 F5 F7`, and `alt`+arrows for history.
+* **A lone `alt`, pressed and released, puts the window into menu mode.** Windows
+  enters its own message loop and the webview stops delivering pointer events
+  until the next click. There is no menu on this window at all, so both keydown
+  and keyup for a bare `alt` are swallowed there. `alt` as a modifier is
+  untouched, because the system sets `altKey` on mouse events rather than these
+  handlers.
+
+The part to get right is what stays. Turning selection off everywhere would be
+worse than the disease: a user has to be able to take a path, an error message
+or a line of the third-party notices with them. So `user-select: none` belongs
+on the frame — labels, buttons, headings — and `user-select: text` goes back
+explicitly on the content that is data, which is how the sibling does it too.
+Copy has to keep working wherever selection does.
+
+Blocking a key is also claiming it. `ctrl`+O and `ctrl`+S are on the list, and
+those are the two a project file will want the moment sessions can be saved, so
+this entry and that one should agree on who gets them.
+
+Done when right-click does nothing, when no key reloads, prints, finds or
+opens a browser dialog, when dragging across the window does not paint a
+selection over labels, and when a path, an error and the notices can still be
+selected and copied.
+
 ### Paths are shown with whichever slashes they happened to arrive with
 
 The three result files sit in one column under "Where to save", and the column
