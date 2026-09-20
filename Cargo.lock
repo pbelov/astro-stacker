@@ -120,7 +120,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "astro-cli"
-version = "0.25.11"
+version = "0.25.12"
 dependencies = [
  "anyhow",
  "astro-core",
@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "astro-core"
-version = "0.25.11"
+version = "0.25.12"
 dependencies = [
  "log",
  "rayon",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "astro-format-raw"
-version = "0.25.11"
+version = "0.25.12"
 dependencies = [
  "astro-core",
  "rawler",

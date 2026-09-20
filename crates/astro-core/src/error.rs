@@ -36,6 +36,16 @@ pub enum Error {
     #[error("there is nothing to combine")]
     NothingToCombine,
 
+    /// A frame read twice in one combination did not read the same both times.
+    ///
+    /// The streaming path decodes every frame once to find the threshold and
+    /// again to apply it, so a file that changes in between would have one
+    /// version's threshold used on another version's pixels, and the master
+    /// would come out wrong with nothing saying so. A network share, a card,
+    /// or a copy still in flight all allow it.
+    #[error("{path} changed while it was being combined: read twice, decoded differently")]
+    FrameChanged { path: PathBuf },
+
     /// A flat whose zero point could not be measured. Deliberately fatal rather
     /// than falling back to a plausible 2048: a normalisation taken on the
     /// wrong zero is a multiplicative error on every light it touches.

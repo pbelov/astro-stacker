@@ -389,8 +389,13 @@ fn combine_streaming(
     let mut mean = vec![0f32; pixels];
     let mut m2 = vec![0f32; pixels];
 
+    // What each frame decoded to on the first pass, so the second can tell it
+    // is applying the threshold to the pixels it was measured from.
+    let mut first_read = Vec::with_capacity(frames.len());
+
     for (index, &id) in frames.iter().enumerate() {
         let frame = decode(host, session, id, pixels)?;
+        first_read.push(digest(&frame));
         let count = (index + 1) as f32;
         // Banded, not because one frame's fold is parallel — it is strictly
         // sequential in the frames — but because every photosite's fold is
@@ -419,6 +424,10 @@ fn combine_streaming(
     let mut kept = vec![0u32; pixels];
     for (index, &id) in frames.iter().enumerate() {
         let frame = decode(host, session, id, pixels)?;
+        if digest(&frame) != first_read[index] {
+            let path = session.path(id).ok_or(Error::NothingToCombine)?;
+            return Err(Error::FrameChanged { path });
+        }
         sum.par_chunks_mut(BAND)
             .zip(kept.par_chunks_mut(BAND))
             .zip(mean.par_chunks(BAND).zip(m2.par_chunks(BAND)))
@@ -456,6 +465,35 @@ fn combine_streaming(
         rejected,
         resident: false,
     })
+}
+
+/// A fingerprint of what one decode produced.
+///
+/// FNV-1a for the same reason the session's own fingerprints use it: it has to
+/// mean the same thing on the second pass as on the first, and the standard
+/// library's hasher is seeded per process and not stable between releases.
+///
+/// Folded in parallel over the same bands the accumulators use. Measured on a
+/// 45-megapixel buffer: 2 ms across the pool against 32 ms on one thread, and
+/// the decode it guards is a couple of hundred. Parallel it disappears; on one
+/// thread it would be a tenth of the decode, twice per frame.
+///
+/// Each band is seeded with its own index, so moving a value from one band to
+/// another changes the answer. The bands are then combined by exclusive-or,
+/// which is commutative: the result cannot depend on the order the threads
+/// happened to finish in.
+fn digest(samples: &[u16]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x1000_0000_01b3;
+    samples
+        .par_chunks(BAND)
+        .enumerate()
+        .map(|(band, band_samples)| {
+            band_samples.iter().fold(OFFSET ^ band as u64, |hash, &sample| {
+                (hash ^ u64::from(sample)).wrapping_mul(PRIME)
+            })
+        })
+        .reduce(|| 0, |left, right| left ^ right)
 }
 
 fn decode(host: &Formats, session: &Session, id: FrameId, pixels: usize) -> Result<Vec<u16>> {
@@ -533,6 +571,167 @@ fn clipped_mean(values: &[f32], kappa: f32) -> (f32, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicUsize;
+
+    use crate::format::{Format, Frame};
+    use crate::frame::{
+        FormatDescription, FrameInfo, PROBE_CERTAIN, PROBE_UNSUPPORTED, SampleFormat,
+        samples_u16_mut,
+    };
+
+    /// A decoder whose files read the same every time, except one.
+    ///
+    /// Standing in for what a network share, a card or a copy still in flight
+    /// does to a frame between the two passes of the streaming path.
+    struct Wobbles {
+        unstable: PathBuf,
+        opens: AtomicUsize,
+        description: FormatDescription,
+    }
+
+    struct Fixed {
+        value: u16,
+        layout: ImageLayout,
+        info: FrameInfo,
+    }
+
+    const SIDE: u32 = 4;
+
+    impl Wobbles {
+        fn new(unstable: impl Into<PathBuf>) -> Self {
+            Self {
+                unstable: unstable.into(),
+                opens: AtomicUsize::new(0),
+                description: FormatDescription {
+                    id: "wobbles".to_owned(),
+                    display_name: "Wobbles".to_owned(),
+                    version: "0".to_owned(),
+                    author: "test".to_owned(),
+                    extensions: vec!["fake".to_owned()],
+                },
+            }
+        }
+    }
+
+    impl Format for Wobbles {
+        fn description(&self) -> &FormatDescription {
+            &self.description
+        }
+
+        fn probe(&self, path: &Path, _header: &[u8]) -> i32 {
+            if path.extension().is_some_and(|e| e == "fake") { PROBE_CERTAIN } else { PROBE_UNSUPPORTED }
+        }
+
+        fn open(&self, path: &Path) -> Result<Box<dyn Frame>> {
+            // Every open of the unstable file answers differently, so whichever
+            // two of them the two passes get, they disagree.
+            let value = if path == self.unstable {
+                1000 + self.opens.fetch_add(1, Ordering::Relaxed) as u16
+            } else {
+                1000
+            };
+            let layout = ImageLayout {
+                width: SIDE,
+                height: SIDE,
+                components: 1,
+                bits_per_sample: 16,
+                sample_format: SampleFormat::U16,
+                ..ImageLayout::default()
+            };
+            Ok(Box::new(Fixed { value, layout, info: FrameInfo::default() }))
+        }
+    }
+
+    impl Frame for Fixed {
+        fn layout(&self) -> &ImageLayout {
+            &self.layout
+        }
+
+        fn info(&self) -> &FrameInfo {
+            &self.info
+        }
+
+        fn read_samples(&self, dst: &mut [u8]) -> Result<()> {
+            let samples = samples_u16_mut(dst).ok_or(Error::NothingToCombine)?;
+            samples.fill(self.value);
+            Ok(())
+        }
+    }
+
+    /// A session of `count` files, the last of which reads differently every
+    /// time when `unstable` is set.
+    fn wobbly_session(count: usize, unstable: bool) -> Option<(Formats, Session, Vec<FrameId>)> {
+        let root = std::env::temp_dir().join(format!("astro-combine-{count}-{unstable}"));
+        std::fs::create_dir_all(&root).ok()?;
+        let mut paths = Vec::new();
+        for index in 0..count {
+            let path = root.join(format!("frame-{index:03}.fake"));
+            // Distinct bytes per file: the scan recognises a frame by its
+            // length and the hash of its header, and twenty-six identical
+            // files are one frame to it.
+            std::fs::write(&path, format!("frame {index} of {count}")).ok()?;
+            paths.push(path);
+        }
+
+        let mut host = Formats::new();
+        let odd = if unstable { paths[count - 1].clone() } else { root.join("no-such-file") };
+        host.add(Wobbles::new(odd)).ok()?;
+
+        let options = crate::session::scan::ScanOptions {
+            rules: vec![crate::session::scan::RoleRule::new(
+                &root,
+                Some(crate::session::FrameKind::Dark),
+            )],
+            ..Default::default()
+        };
+        let report = crate::session::scan(&host, &options).ok()?;
+        let ids: Vec<FrameId> = report.session.ids().collect();
+        Some((host, report.session, ids))
+    }
+
+    /// The streaming path reads every frame twice: once to find the threshold,
+    /// once to apply it. Nothing used to tie the two reads together except the
+    /// sample count, so a file that changed in between had one version's
+    /// threshold applied to another version's pixels, and the master came out
+    /// wrong with nothing saying so.
+    #[test]
+    fn a_frame_that_changes_between_the_two_passes_stops_the_master() {
+        // Past MEDIAN_CEILING so the set streams rather than being held, which
+        // is the only path that reads a frame twice.
+        let count = MEDIAN_CEILING + 1;
+        let Some((host, session, ids)) = wobbly_session(count, true) else { return };
+        assert_eq!(ids.len(), count, "every file was scanned");
+
+        let options = CombineOptions { resident_bytes: 0, ..Default::default() };
+        let outcome = combine(&host, &session, &ids, &options, &|_, _| {});
+
+        let Err(Error::FrameChanged { path }) = outcome else {
+            panic!("a frame that read differently twice must stop the master");
+        };
+        assert!(path.ends_with(format!("frame-{:03}.fake", count - 1)), "{}", path.display());
+    }
+
+    /// And the check must not cost an ordinary run its master: the same set
+    /// with every file steady combines to the one value they all hold.
+    #[test]
+    fn frames_that_read_the_same_twice_combine_as_before() {
+        let count = MEDIAN_CEILING + 1;
+        let Some((host, session, ids)) = wobbly_session(count, false) else { return };
+
+        let options = CombineOptions { resident_bytes: 0, ..Default::default() };
+        let combined = combine(&host, &session, &ids, &options, &|_, _| {})
+            .expect("a steady set combines");
+        assert!(!combined.resident, "the set must have taken the streaming path");
+        assert_eq!(combined.frames, count);
+        assert!(
+            combined.pixels.iter().all(|value| (value - 1000.0).abs() < 1e-3),
+            "{:?}",
+            &combined.pixels[..4],
+        );
+    }
+
 
     /// One photosite through the streaming path, written out longhand.
     ///

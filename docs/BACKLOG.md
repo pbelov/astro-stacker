@@ -8,29 +8,6 @@ rediscovering why it was written down.
 
 ## Defects
 
-### A calibration frame is decoded twice and nothing says it is the same frame
-
-`combine_streaming` in `crates/astro-core/src/calibrate/combine.rs` reads every
-frame twice: pass one folds each photosite's mean and spread by Welford's
-method, pass two decodes the frame again and rejects against the threshold pass
-one produced. Nothing ties the second read to the first. The only check is that
-the sample count matches, which a file of the same dimensions passes whatever
-its pixels now say.
-
-So a file that changes between the passes has the threshold of one version
-applied to the pixels of another, and the master comes out wrong with nothing
-reporting it. That is not hypothetical for the way these files are kept: a
-network share, a removable card, or a transfer still in flight all allow it, and
-a session is often pointed at a folder while it is still filling.
-
-Found while unifying the combination paths at 0.18.0 and left on purpose then,
-because it is a different class of defect from the ones that change was making.
-
-Done when the second pass verifies it is reading what the first pass measured —
-a checksum taken in pass one is the cheap way — and when a frame that fails that
-check stops the master with a sentence naming the file, rather than being folded
-in.
-
 ### The two combination paths find the centre by different arithmetic
 
 The in-memory path takes an exact sum in `clipped_mean`; the streaming path
