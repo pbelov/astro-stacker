@@ -84,6 +84,16 @@
   const number = (value: number, decimals = 2) =>
     Number.isFinite(value) ? trim(value, decimals) : "—";
 
+  /** Что видно, пока раздел свёрнут: иначе сворачивание прячет и ответ тоже. */
+  const summary = $derived(
+    result
+      ? i18n.t("stackedSummary", {
+          light: light(result.keptSeconds),
+          frames: result.stacked,
+        })
+      : "",
+  );
+
   const worst = $derived(
     result ? [...result.frames].sort((a, b) => a.weight - b.weight).slice(0, 8) : [],
   );
@@ -132,8 +142,8 @@
     {/if}
   </section>
 
-  <section class="card">
-    <h2>{i18n.t("whatWasStacked")}</h2>
+  <details class="card fold" bind:open={stacking.opened.stacked}>
+    <summary><h2>{i18n.t("whatWasStacked")}</h2><span class="dim">{summary}</span></summary>
     <table class="num stats">
       <tbody>
         <tr>
@@ -212,7 +222,7 @@
         </ul>
       {/if}
     {/if}
-  </section>
+  </details>
 
   {#if result.refused.length > 0}
     <section class="card">
@@ -225,9 +235,11 @@
     </section>
   {/if}
 
-  <section class="card">
-    <h2>{i18n.t("lightestWeights")}</h2>
-    <p class="muted">{i18n.t("lightestHint")}</p>
+  <details class="card fold" bind:open={stacking.opened.weights}>
+    <summary>
+      <h2>{i18n.t("lightestWeights")}</h2>
+      <span class="dim">{i18n.t("lightestHint")}</span>
+    </summary>
     <table class="num frames">
       <thead>
         <tr>
@@ -252,10 +264,54 @@
         {/each}
       </tbody>
     </table>
-  </section>
+  </details>
 {/if}
 
 <style>
+  /* Раздел сворачивается, и свёрнутым остаётся строкой: две подробные таблицы
+     раскрытыми выталкивали за край окна то, ради чего на этот шаг пришли —
+     картинку и кнопки сохранения. */
+  .fold summary {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .fold summary::-webkit-details-marker {
+    display: none;
+  }
+  .fold summary h2 {
+    margin: 0;
+    /* Заголовок не переносится: подпись рядом бывает длинной, и разорванное
+       надвое название раздела читается как две строки, а не как одна. */
+    white-space: nowrap;
+    flex: none;
+  }
+  /* Своя стрелка, а не браузерная: та стоит вплотную к тексту и в разных
+     сборках WebView2 рисуется по-разному. */
+  .fold summary h2::before {
+    content: "▸";
+    display: inline-block;
+    width: 1em;
+    color: var(--dim);
+    transition: transform 0.12s ease;
+  }
+  .fold[open] summary h2::before {
+    transform: rotate(90deg);
+  }
+  .fold summary span {
+    font-size: 12px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fold[open] summary {
+    margin-bottom: 10px;
+  }
+
   .preview canvas {
     display: block;
     width: 100%;

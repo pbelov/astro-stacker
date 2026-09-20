@@ -194,6 +194,48 @@ named and the program's own data, and when closing with unsaved work says so.
 
 ## The result
 
+### Make the preview something you can actually look at
+
+The result step shows one picture at one size, scaled to the pane. That is
+enough to see that a stack happened and not enough to judge it: the question a
+stack raises is what the stars look like at pixel scale, and the answer is two
+zoom levels away.
+
+What it wants:
+
+* **Zoom on `ctrl` and the wheel, smoothly** — continuous rather than in steps,
+  anchored on the pointer, so the thing under the cursor stays under it.
+* **Space toggles 1:1 and fit.** Those are the two sizes anyone actually uses,
+  and swapping between them is how a stack gets judged — fit to see the frame,
+  1:1 to see whether the stars are round.
+* **Exposure and contrast under it**, with at least ±5 EV of headroom on
+  exposure. The stretch the window applies is one opinion about a linear frame;
+  a faint object can sit a stop and a half below where that opinion put it.
+
+Three things to get right, none of them obvious:
+
+* **It must not touch the file.** These are viewing controls, like the stretched
+  TIFF itself, and the FITS and the linear TIFF are the measurement. Whether
+  moving the sliders should change what a saved view TIFF contains is a real
+  question and the answer is probably yes — but it has to be a decision, not a
+  side effect.
+* **The preview is 1400 pixels on its long side, so 1:1 is a lie.** A 45
+  megapixel stack at 1:1 means the window has to ask for pixels it was never
+  sent. Either the preview command grows a crop-and-scale form — give it a
+  rectangle of the canvas and a size, and it renders that from the stack still
+  held in memory — or 1:1 means 1:1 of the preview and says so. The first is
+  right and is most of the work in this entry.
+* **Exposure and contrast belong on the levelled copy, not the stretch.** The
+  stretch is asinh over a black point and a white point; exposure is a
+  multiplier before it and contrast is the softening term. Applying them after
+  the stretch would clip what is already compressed.
+
+Done when the picture can be zoomed with the pointer and swapped between 1:1
+and fit without thinking about it, when 1:1 shows the stack's own pixels rather
+than the preview's, when the two sliders move what is shown without touching
+what was measured, and when leaving the step and coming back does not reset
+where you were looking.
+
 ### Say what a session holds before it is stacked
 
 The result now states its light — kept, shot and weighted, with the total in the
