@@ -76,6 +76,14 @@ pub struct Header {
     pub iso: Option<f64>,
     /// How many frames went into it.
     pub frames: usize,
+    /// Seconds of light the result holds in total, where that means anything.
+    ///
+    /// `EXPTIME` beside it is one frame's exposure, and a reader that wants the
+    /// whole would otherwise have to multiply it by `STACKCNT` — which is wrong
+    /// the moment the frames were not all the same length, and wrong again when
+    /// some were refused. `None` where no frame recorded its exposure, rather
+    /// than a zero that reads as an answer.
+    pub integration: Option<f64>,
     pub combination: String,
     /// `RGGB` and the like, or `None` for a frame that is not mosaiced.
     pub bayer_pattern: Option<String>,
@@ -153,6 +161,9 @@ pub fn write_planes(
         cards.push(Card::real("ISOSPEED", iso));
     }
     cards.push(Card::integer("STACKCNT", header.frames as i64));
+    if let Some(integration) = header.integration {
+        cards.push(Card::real("LIVETIME", integration));
+    }
     if !header.combination.is_empty() {
         cards.push(Card::text("COMBINE", &header.combination));
     }
@@ -217,6 +228,7 @@ mod tests {
             exposure: Some(30.0),
             iso: Some(6400.0),
             frames: 11,
+            integration: Some(330.0),
             combination: "median".to_owned(),
             bayer_pattern: Some("GBRG".to_owned()),
             notes: vec!["nothing rejected".to_owned()],

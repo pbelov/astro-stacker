@@ -46,7 +46,9 @@ export type Progress =
 export type Roots = Record<string, string[]>;
 
 /** Чем набор кадров отличается от другого набора. */
-const signature = (roots: Roots) => JSON.stringify(roots);
+/** Экспортируется ради сложения: у него тот же вопрос об устаревшем
+ *  результате, и два ответа на него разошлись бы при первой же правке. */
+export const signature = (roots: Roots) => JSON.stringify(roots);
 
 class Measurement {
   running = $state(false);

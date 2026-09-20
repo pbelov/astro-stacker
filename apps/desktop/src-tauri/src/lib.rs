@@ -223,7 +223,7 @@ pub enum Progress {
     /// each says what it is.
     Aligning,
     Stacking { pass: usize, passes: usize, done: usize, total: usize, name: String },
-    Writing,
+    Finishing,
     /// Building one of the masters. These come first and take about a third of
     /// the time, so a bar that only counted lights would sit at zero through
     /// them and read as a hang.
@@ -304,10 +304,20 @@ pub struct StackResultDto {
     pub stacked: usize,
     pub width: usize,
     pub height: usize,
-    pub seconds: f64,
+    /// How long the run took. Not to be confused with the three below, which
+    /// are how much light it holds.
+    pub elapsed: f64,
+    /// Seconds of light in every frame the set offered, whatever became of it.
+    pub shot_seconds: f64,
+    /// Seconds of light in the frames that were actually stacked.
+    pub kept_seconds: f64,
+    /// `kept_seconds` discounted by weight, the way `effective` discounts the
+    /// frame count: how deep the stack is rather than how long it ran.
+    pub effective_seconds: f64,
+    /// Frames that recorded no exposure, so the totals above are a floor.
+    pub exposures_unrecorded: usize,
     /// Per colour plane: what share carries data, and how deep it is.
     pub coverage: Vec<CoverageDto>,
-    pub written: Vec<String>,
     /// How many deposits the second pass threw away, out of how many, or `null`
     /// where rejection was not asked for.
     pub rejected: Option<(usize, usize)>,
@@ -331,6 +341,7 @@ pub struct CoverageDto {
 
 const READING: &str = "reading frames";
 const STACKING: &str = "stacking";
+const WRITING: &str = "writing the result";
 
 /// What the log and a refusal call a measurement. One function, because two
 /// spellings of one pass read in the log as two passes.
@@ -355,6 +366,29 @@ pub struct Running {
     preview: std::sync::Mutex<Vec<u8>>,
     /// A measurement stopped part way through, kept so it can be continued.
     held: std::sync::Mutex<Option<Stopped>>,
+    /// The stack a finished run produced, kept so its files can be written
+    /// afterwards instead of being named before there was anything to keep.
+    finished: std::sync::Mutex<Option<Finished>>,
+}
+
+/// A stack that has been made and not yet written anywhere.
+///
+/// Held rather than recomputed because the refusal this replaces existed for a
+/// reason: a run of a few hundred frames is minutes of work, and finding out at
+/// the end that it went nowhere is the worst moment to be told. Saving from
+/// memory is what makes naming the files afterwards safe instead of reckless.
+///
+/// What is kept is the planes and enough to describe them. The coverage planes
+/// are dropped as soon as they have been summarised — they are as large as the
+/// stack itself and nothing writes them — and the levelled copy is rebuilt when
+/// a stretched TIFF is asked for, since `for_viewing` is a pure function of
+/// what is here and holding its output would be a third copy of the frame.
+struct Finished {
+    stacked: astro_core::pipeline::stack::Stacked,
+    /// Owned: the header is built from a `Selection`, which borrows the survey,
+    /// and none of that outlives the command that made it.
+    header: fits::Header,
+    layout: astro_core::frame::ImageLayout,
 }
 
 /// The right to run, held for exactly as long as the pass is.
@@ -761,7 +795,6 @@ async fn stack_run(
     pixfrac: f64,
     reject: bool,
     kappa: f32,
-    out: Outputs,
     on: Channel<Progress>,
     state: State<'_, Running>,
 ) -> Result<StackResultDto, String> {
@@ -769,7 +802,7 @@ async fn stack_run(
         STACKING,
         stack(
             roots, sigma, max_stars, raw, sharpness, max_trail, max_fwhm, max_shift, pixfrac,
-            reject, kappa, out, on, state,
+            reject, kappa, on, state,
         ),
     )
     .await
@@ -788,7 +821,6 @@ async fn stack(
     pixfrac: f64,
     reject: bool,
     kappa: f32,
-    out: Outputs,
     on: Channel<Progress>,
     state: State<'_, Running>,
 ) -> Result<StackResultDto, String> {
@@ -797,11 +829,10 @@ async fn stack(
     if rules.is_empty() {
         return Err("nothing to stack".to_owned());
     }
-    // Refused here rather than after the run: a stack of a few hundred frames
-    // is minutes of work, and finding out at the end that it was written
-    // nowhere is the worst moment to be told.
-    if out.none_named() {
-        return Err("no result file was named".to_owned());
+    // Whatever the last run left is gone the moment another starts: it can no
+    // longer serve, and it is the size of the frame twice over.
+    if let Ok(mut slot) = state.finished.lock() {
+        *slot = None;
     }
     let cancel = state.cancel.clone();
     let stopped = || cancel.load(Ordering::Relaxed);
@@ -892,17 +923,17 @@ async fn stack(
         Err(error) => return Err(format!("{error:#}")),
     };
 
-    let _ = on.send(Progress::Writing);
+    let _ = on.send(Progress::Finishing);
     let first = selection.frames.first().ok_or("nothing was stacked")?;
-    let mosaic = Mosaic::new(&first.read.layout).ok_or("the frames are not a mosaic")?;
+    let layout = first.read.layout;
+    let mosaic = Mosaic::new(&layout).ok_or("the frames are not a mosaic")?;
 
-    let levelled = view::for_viewing(&stacked, &first.read.layout, &mosaic, true);
-    let written =
-        write(&stacked, &selection, &mosaic, &levelled, &out).map_err(|e| format!("{e:#}"))?;
-
-    // The preview is rendered from the levelled copy, the same one the stretched
-    // TIFF beside it comes from, so the window and the file agree.
+    // The preview is rendered from the levelled copy, the same one a stretched
+    // TIFF is built from later, so the window and the file agree.
+    let levelled = view::for_viewing(&stacked, &layout, &mosaic, true);
     let rendered = view::preview(&levelled, &stacked, 1400, 200.0);
+    let note = levelled.note.clone();
+    drop(levelled);
     if let Ok(mut slot) = state.preview.lock() {
         *slot = rendered.rgba;
     }
@@ -912,8 +943,61 @@ async fn stack(
     weights.sort_by(f64::total_cmp);
     let total: f64 = weights.iter().sum();
     let squares: f64 = weights.iter().map(|w| w * w).sum();
+    let effective = if squares > 0.0 { (total * total / squares).round() as usize } else { 0 };
 
-    Ok(StackResultDto {
+    // Three totals, because they answer three different questions and only one
+    // of them is what the night cost. `shot` counts every light the set held,
+    // `kept` only the frames that survived selection, and `effective` discounts
+    // `kept` in the same proportion the effective frame count discounts the
+    // count — a run carried by a few good frames is not as deep as its total.
+    let (kept_seconds, kept_unrecorded) =
+        astro_core::pipeline::stack::integration(&selection.frames);
+    let (shot_seconds, shot_unrecorded) =
+        ids.iter().fold((0.0f64, 0usize), |(seconds, silent), &id| {
+            match session[id].info.exposure_seconds {
+                Some(each) => (seconds + each, silent),
+                None => (seconds, silent + 1),
+            }
+        });
+    let effective_seconds = if stacked.frames > 0 {
+        kept_seconds * effective as f64 / stacked.frames as f64
+    } else {
+        0.0
+    };
+
+    let header = fits::Header {
+        image_type: FrameKind::Light.name().to_owned(),
+        instrument: first.read.camera_model.clone(),
+        exposure: first.read.exposure_seconds,
+        iso: first.read.iso,
+        frames: stacked.frames,
+        // Absent rather than zero when nothing recorded an exposure: a stack
+        // that claims no light at all would be read as a fact.
+        integration: (kept_unrecorded < selection.frames.len()).then_some(kept_seconds),
+        combination: "weighted mean".to_owned(),
+        bayer_pattern: None,
+        notes: vec!["NaN where no frame covered the pixel".to_owned()],
+    };
+
+    let coverage: Vec<CoverageDto> = stacked
+        .coverage
+        .iter()
+        .map(|plane| {
+            let mut depths: Vec<f32> = plane.iter().copied().filter(|w| *w > 0.0).collect();
+            if depths.is_empty() {
+                return CoverageDto { filled: 0.0, median_depth: 0.0, thinnest: 0.0 };
+            }
+            depths.sort_by(f32::total_cmp);
+            let at = |f: f64| f64::from(depths[((depths.len() - 1) as f64 * f) as usize]);
+            CoverageDto {
+                filled: depths.len() as f64 / plane.len() as f64 * 100.0,
+                median_depth: at(0.5),
+                thinnest: at(0.1),
+            }
+        })
+        .collect();
+
+    let dto = StackResultDto {
         frames: selection
             .frames
             .iter()
@@ -931,69 +1015,83 @@ async fn stack(
             .iter()
             .map(|(name, reason)| RejectedDto { name: name.clone(), reason: reason.clone() })
             .collect(),
-        effective: if squares > 0.0 { (total * total / squares).round() as usize } else { 0 },
+        effective,
         stacked: stacked.frames,
         width: stacked.canvas.width,
         height: stacked.canvas.height,
-        seconds: stacked.seconds,
-        coverage: stacked
-            .coverage
-            .iter()
-            .map(|plane| {
-                let mut depths: Vec<f32> =
-                    plane.iter().copied().filter(|w| *w > 0.0).collect();
-                if depths.is_empty() {
-                    return CoverageDto { filled: 0.0, median_depth: 0.0, thinnest: 0.0 };
-                }
-                depths.sort_by(f32::total_cmp);
-                let at = |f: f64| f64::from(depths[((depths.len() - 1) as f64 * f) as usize]);
-                CoverageDto {
-                    filled: depths.len() as f64 / plane.len() as f64 * 100.0,
-                    median_depth: at(0.5),
-                    thinnest: at(0.1),
-                }
-            })
-            .collect(),
-        written,
+        elapsed: stacked.seconds,
+        shot_seconds,
+        kept_seconds,
+        effective_seconds,
+        exposures_unrecorded: kept_unrecorded + shot_unrecorded,
+        coverage,
         rejected: stacked.rejected,
         heavy_losses: stacked.heavy_losses.clone(),
         preview_width: rendered.width,
         preview_height: rendered.height,
-        note: levelled.note,
-    })
+        note,
+    };
+
+    // Summarised, so the coverage planes have no reader left: they are as large
+    // as the stack itself, and holding them until the user picks a file would
+    // double what an unsaved result costs.
+    let mut stacked = stacked;
+    stacked.coverage = Vec::new();
+    if let Ok(mut slot) = state.finished.lock() {
+        *slot = Some(Finished { stacked, header, layout });
+    }
+
+    Ok(dto)
+}
+
+/// Writes whichever of the finished stack's files have been named.
+///
+/// Named now, after the run, rather than before it: the point of holding the
+/// result is that the decision about what to keep is made when there is
+/// something to look at. Callable more than once — a FITS now and a stretched
+/// TIFF five minutes later is an ordinary thing to want — and it does not
+/// consume what it writes from.
+#[tauri::command]
+async fn stack_write(out: Outputs, state: State<'_, Running>) -> Result<Vec<String>, String> {
+    journal::pass_async(WRITING, write_finished(out, state)).await
+}
+
+async fn write_finished(out: Outputs, state: State<'_, Running>) -> Result<Vec<String>, String> {
+    if out.none_named() {
+        return Err("no result file was named".to_owned());
+    }
+    // A pass over every pixel per file, so it is a pass like any other and
+    // takes the run rather than racing a measurement for the cores.
+    let _claim = state.claim(WRITING)?;
+
+    let slot = state.finished.lock().unwrap_or_else(|held| held.into_inner());
+    let Some(finished) = slot.as_ref() else {
+        return Err("there is no stack to write: run one first".to_owned());
+    };
+    let mosaic = Mosaic::new(&finished.layout).ok_or("the frames are not a mosaic")?;
+    write(&finished.stacked, &finished.header, &finished.layout, &mosaic, &out)
+        .map_err(|why| format!("{why:#}"))
 }
 
 /// Writes whichever results were named, in the same form the command line does.
 ///
-/// `levelled` is passed in rather than built here because the preview needs the
-/// same copy, and building it twice is a second pass over every pixel of the
-/// stack for a result that is identical to the first.
+/// Every argument comes from [`Finished`], so this can run long after the run
+/// that produced it — which is the point: the user names files when there is
+/// something to name them for.
 fn write(
     stacked: &astro_core::pipeline::stack::Stacked,
-    selection: &astro_core::pipeline::stack::Selection<'_>,
+    header: &fits::Header,
+    layout: &astro_core::frame::ImageLayout,
     mosaic: &Mosaic,
-    levelled: &view::Viewable,
     out: &Outputs,
 ) -> std::io::Result<Vec<String>> {
-    let first = &selection.frames[0];
     let (width, height) = (stacked.canvas.width, stacked.canvas.height);
-
-    let header = fits::Header {
-        image_type: FrameKind::Light.name().to_owned(),
-        instrument: first.read.camera_model.clone(),
-        exposure: first.read.exposure_seconds,
-        iso: first.read.iso,
-        frames: stacked.frames,
-        combination: "weighted mean".to_owned(),
-        bayer_pattern: None,
-        notes: vec!["NaN where no frame covered the pixel".to_owned()],
-    };
     let borrowed: Vec<&[f32]> = stacked.planes.iter().map(|p| p.as_slice()).collect();
     let mut written = Vec::new();
 
     if let Some(target) = &out.fits {
         let target = at(target)?;
-        fits::write_planes(&target, &borrowed, width, height, &header)?;
+        fits::write_planes(&target, &borrowed, width, height, header)?;
         written.push(target.display().to_string());
     }
 
@@ -1001,7 +1099,7 @@ fn write(
     // that wants the FITS alone should not pay for it.
     if let Some(target) = &out.tiff {
         let target = at(target)?;
-        let linear = view::for_viewing(stacked, &first.read.layout, mosaic, false);
+        let linear = view::for_viewing(stacked, layout, mosaic, false);
         let planes: Vec<&[f32]> = linear.planes.iter().map(|p| p.as_slice()).collect();
         tiff::write(
             &target,
@@ -1014,6 +1112,10 @@ fn write(
 
     if let Some(target) = &out.view {
         let target = at(target)?;
+        // Rebuilt rather than held: a pure function of what `Finished` keeps,
+        // so it comes out the same as the copy the preview was rendered from,
+        // and holding it would be a third copy of a 45-megapixel frame.
+        let levelled = view::for_viewing(stacked, layout, mosaic, true);
         let planes: Vec<&[f32]> = levelled.planes.iter().map(|p| p.as_slice()).collect();
         let floor = view::percentile(&levelled.planes[mosaic.dominant], 0.02).min(levelled.common);
         tiff::write(
@@ -1342,6 +1444,7 @@ pub fn run() {
             scan_session,
             measure_quality,
             stack_run,
+            stack_write,
             stack_preview,
             cancel,
             log_file,
@@ -1577,8 +1680,25 @@ mod tests {
         }
 
         let first = &selection.frames[0];
-        let mosaic = Mosaic::new(&first.read.layout).expect("a mosaic");
-        let levelled = view::for_viewing(&stacked, &first.read.layout, &mosaic, true);
+        let layout = first.read.layout;
+        let mosaic = Mosaic::new(&layout).expect("a mosaic");
+        let levelled = view::for_viewing(&stacked, &layout, &mosaic, true);
+        // What the window holds after a run, built here the same way, so the
+        // writing below goes through the path a save button takes.
+        let (kept_seconds, unrecorded) =
+            astro_core::pipeline::stack::integration(&selection.frames);
+        let header = fits::Header {
+            image_type: FrameKind::Light.name().to_owned(),
+            instrument: first.read.camera_model.clone(),
+            exposure: first.read.exposure_seconds,
+            iso: first.read.iso,
+            frames: stacked.frames,
+            integration: (unrecorded < selection.frames.len()).then_some(kept_seconds),
+            combination: "weighted mean".to_owned(),
+            bayer_pattern: None,
+            notes: vec!["NaN where no frame covered the pixel".to_owned()],
+        };
+        assert!(kept_seconds > 0.0, "the night held some light");
         let rendered = view::preview(&levelled, &stacked, 1400, 200.0);
 
         assert_eq!(
@@ -1605,7 +1725,7 @@ mod tests {
 
         let only_fits =
             Outputs { fits: Some(named("one.fits")), tiff: None, view: None };
-        let written = write(&stacked, &selection, &mosaic, &levelled, &only_fits)
+        let written = write(&stacked, &header, &layout, &mosaic, &only_fits)
             .expect("the FITS is written");
         assert_eq!(written.len(), 1, "one named, one written: {written:?}");
         assert!(dir.join("one.fits").is_file());
@@ -1622,7 +1742,7 @@ mod tests {
             tiff: Some(named("two.tif")),
             view: Some(named("two-view.tif")),
         };
-        let written = write(&stacked, &selection, &mosaic, &levelled, &all)
+        let written = write(&stacked, &header, &layout, &mosaic, &all)
             .expect("all three are written");
         assert_eq!(written.len(), 3);
         for name in ["two.fits", "two.tif", "two-view.tif"] {

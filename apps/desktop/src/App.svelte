@@ -8,15 +8,23 @@
   import appIcon from "./ui/app-icon.png";
   import DropZone from "./ui/DropZone.svelte";
   import Quality from "./Quality.svelte";
+  import Result from "./Result.svelte";
   import Stack from "./Stack.svelte";
   import { i18n, LOCALES, type Keys, type Locale } from "./i18n.svelte";
   import { folderOf, remember, startFilePick, startFolderPick } from "./places";
 
-  type Step = "frames" | "quality" | "stack";
-  const STEPS: { id: Step; key: "stepFrames" | "stepQuality" | "stepStack"; ready: boolean }[] = [
+  type Step = "frames" | "quality" | "stack" | "result";
+  const STEPS: {
+    id: Step;
+    key: "stepFrames" | "stepQuality" | "stepStack" | "stepResult";
+    ready: boolean;
+  }[] = [
     { id: "frames", key: "stepFrames", ready: true },
     { id: "quality", key: "stepQuality", ready: true },
     { id: "stack", key: "stepStack", ready: true },
+    // Свой шаг, а не хвост сложения: пока результат жил под настройками, его
+    // приходилось искать прокруткой мимо того, чем он уже сделан.
+    { id: "result", key: "stepResult", ready: true },
   ];
 
   type Role = "lights" | "darks" | "flats" | "biases" | "darkFlats";
@@ -133,9 +141,60 @@
   // onMount не может быть async и вернуть уборку одновременно, поэтому подписка
   // складывается сюда, а снимается в onDestroy.
   let unlisten: (() => void) | null = null;
+  /** Снятие слушателей, которыми окно перестаёт вести себя как страница. */
+  let unhide: (() => void) | null = null;
+
+  /**
+   * Всё, чем webview выдаёт, что он webview.
+   *
+   * Контекстное меню WebView2 предлагает «Обновить» и «Просмотреть код», F5
+   * перезагружает окно, Ctrl+P открывает печать страницы. В программе для
+   * рабочего стола этому места нет.
+   *
+   * Сравнение по `e.code`, то есть по физической клавише: WebView2 срабатывает
+   * независимо от раскладки, и на ЙЦУКЕН Ctrl+A приходит как Ctrl+«ф», так что
+   * обработчик, написанный по букве, просто промахнётся. Приём взят у соседнего
+   * star-trails, где это уже прошли.
+   */
+  const BROWSER_KEYS = new Set([
+    "KeyA", "KeyF", "KeyG", "KeyP", "KeyR", "KeyS", "KeyO", "KeyU", "KeyJ", "KeyL",
+    "Equal", "Minus", "Digit0", "NumpadAdd", "NumpadSubtract", "Numpad0",
+  ]);
+
+  function hideTheWebview(): () => void {
+    const menu = (e: Event) => e.preventDefault();
+    const keys = (e: KeyboardEvent) => {
+      const held = e.ctrlKey || e.metaKey;
+      if (
+        (held && BROWSER_KEYS.has(e.code)) ||
+        ["F3", "F5", "F7"].includes(e.code) ||
+        (e.altKey && (e.code === "ArrowLeft" || e.code === "ArrowRight"))
+      ) {
+        e.preventDefault();
+      }
+    };
+    // Одиночный Alt, нажатый и отпущенный, вводит окно в режим меню: Windows
+    // уходит в свой цикл сообщений, и webview перестаёт слать события указателя
+    // до следующего клика. Меню у окна нет вовсе. Alt как модификатор не
+    // страдает: `altKey` в событиях мыши ставит система, а не это.
+    const loneAlt = (e: KeyboardEvent) => {
+      if (e.key === "Alt") e.preventDefault();
+    };
+    window.addEventListener("contextmenu", menu);
+    window.addEventListener("keydown", keys);
+    window.addEventListener("keydown", loneAlt);
+    window.addEventListener("keyup", loneAlt);
+    return () => {
+      window.removeEventListener("contextmenu", menu);
+      window.removeEventListener("keydown", keys);
+      window.removeEventListener("keydown", loneAlt);
+      window.removeEventListener("keyup", loneAlt);
+    };
+  }
 
   onMount(() => {
     document.documentElement.lang = i18n.locale;
+    unhide = hideTheWebview();
     void (async () => {
       version = await invoke<string>("app_version");
       formats = await invoke<string[]>("formats");
@@ -159,7 +218,10 @@
     })();
   });
 
-  onDestroy(() => unlisten?.());
+  onDestroy(() => {
+    unlisten?.();
+    unhide?.();
+  });
 
   function zoneAt(x: number, y: number): Role | null {
     const scale = window.devicePixelRatio || 1;
@@ -562,7 +624,9 @@
     {:else if step === "quality"}
       <Quality {roots} {kindName} {trim} />
     {:else if step === "stack"}
-      <Stack {roots} {kindName} {trim} />
+      <Stack {roots} {kindName} {trim} onFinished={() => (step = "result")} />
+    {:else if step === "result"}
+      <Result {trim} />
     {/if}
   </main>
 </div>

@@ -530,22 +530,30 @@ fn median(values: &mut [f32]) -> f32 {
 /// The mean of the values within `kappa` sigma of their own mean, in one pass,
 /// with the count that fell outside.
 fn clipped_mean(values: &[f32], kappa: f32) -> (f32, u64) {
-    let count = values.len() as f32;
-    let mean = values.iter().sum::<f32>() / count;
+    // Welford, and not because it is the better estimator here — with every
+    // value in hand an exact sum is marginally more accurate. It is because
+    // [`combine_streaming`] cannot use anything else: it never holds a
+    // photosite's values at once. While the two differed, they agreed about the
+    // centre to within rounding and disagreed about the keep-set at roughly one
+    // photosite in twenty thousand, and which of them ran was decided by
+    // whether the set fitted in memory. A master that depends on how much
+    // memory was free cannot be reasoned about, and that is worth more than the
+    // last bit of accuracy.
+    let (mut mean, mut m2) = (0f32, 0f32);
+    for (index, value) in values.iter().enumerate() {
+        let count = (index + 1) as f32;
+        let delta = value - mean;
+        mean += delta / count;
+        m2 += delta * (value - mean);
+    }
     // Over `n - 1`, not `n`. The mean subtracted here was estimated from these
     // same values, so a degree of freedom has already been spent on it and
     // dividing by the count understates the spread — which tightens the
     // threshold and drops samples that are not outliers. It is also the
     // estimator this module's own reasoning is written in: the relative error
     // quoted at the top is `1/sqrt(2(n-1))`.
-    //
-    // And it has to match [`combine_streaming`], which has always divided by
-    // `n - 1`. The two combine the same frames and which one runs is decided by
-    // whether the set fits in memory, so while they disagreed, how much memory
-    // was free decided how much of a set was rejected.
-    let variance = values.iter().map(|value| (value - mean) * (value - mean)).sum::<f32>()
-        / (count - 1.0).max(1.0);
-    let tolerance = variance.sqrt() * kappa;
+    let divisor = (values.len().saturating_sub(1)).max(1) as f32;
+    let tolerance = (m2 / divisor).max(0.0).sqrt() * kappa;
 
     let mut sum = 0f32;
     let mut kept = 0u32;
@@ -625,13 +633,23 @@ mod tests {
         }
 
         fn open(&self, path: &Path) -> Result<Box<dyn Frame>> {
+            // Values spread across the set, and one frame far out, so that the
+            // clip has something to decide and the two paths are compared on a
+            // set where they could disagree.
+            let index: u16 = path
+                .file_stem()
+                .and_then(|stem| stem.to_string_lossy().rsplit('-').next().map(str::to_owned))
+                .and_then(|digits| digits.parse().ok())
+                .unwrap_or(0);
+            // One outlier, not several: three of them in twenty-six inflate the
+            // spread enough that the threshold forgives all three, and the
+            // test then compares two paths on a set neither of them rejects.
+            let mut value = if index == 4 { 5000 } else { 1000 + index };
             // Every open of the unstable file answers differently, so whichever
             // two of them the two passes get, they disagree.
-            let value = if path == self.unstable {
-                1000 + self.opens.fetch_add(1, Ordering::Relaxed) as u16
-            } else {
-                1000
-            };
+            if path == self.unstable {
+                value += self.opens.fetch_add(1, Ordering::Relaxed) as u16 + 1;
+            }
             let layout = ImageLayout {
                 width: SIDE,
                 height: SIDE,
@@ -713,25 +731,45 @@ mod tests {
         assert!(path.ends_with(format!("frame-{:03}.fake", count - 1)), "{}", path.display());
     }
 
-    /// And the check must not cost an ordinary run its master: the same set
-    /// with every file steady combines to the one value they all hold.
+    /// The property the two paths exist to share: which one runs is decided by
+    /// whether the set fits in memory, so a master that differs between them is
+    /// a master that depends on how much memory was free. They folded the
+    /// centre differently until now and disagreed about the keep-set at roughly
+    /// one photosite in twenty thousand.
+    ///
+    /// This also holds the other end of the digest: an ordinary set, read twice
+    /// and steady both times, must still produce its master.
     #[test]
-    fn frames_that_read_the_same_twice_combine_as_before() {
+    fn both_paths_produce_the_same_master() {
         let count = MEDIAN_CEILING + 1;
         let Some((host, session, ids)) = wobbly_session(count, false) else { return };
 
-        let options = CombineOptions { resident_bytes: 0, ..Default::default() };
-        let combined = combine(&host, &session, &ids, &options, &|_, _| {})
-            .expect("a steady set combines");
-        assert!(!combined.resident, "the set must have taken the streaming path");
-        assert_eq!(combined.frames, count);
+        let streamed = combine(
+            &host,
+            &session,
+            &ids,
+            &CombineOptions { resident_bytes: 0, ..Default::default() },
+            &|_, _| {},
+        )
+        .expect("a steady set combines");
+        let held = combine(
+            &host,
+            &session,
+            &ids,
+            &CombineOptions { resident_bytes: u64::MAX, ..Default::default() },
+            &|_, _| {},
+        )
+        .expect("and so does the same set held");
+
+        assert!(!streamed.resident && held.resident, "the two paths must actually differ");
+        assert_eq!(streamed.method, held.method, "and combine by the same method");
+        assert_eq!(streamed.rejected, held.rejected, "same samples thrown away");
+        assert!(streamed.rejected > 0, "a set where nothing is rejected proves nothing");
         assert!(
-            combined.pixels.iter().all(|value| (value - 1000.0).abs() < 1e-3),
-            "{:?}",
-            &combined.pixels[..4],
+            streamed.pixels.iter().zip(&held.pixels).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the same frames must give the same master whichever path ran",
         );
     }
-
 
     /// One photosite through the streaming path, written out longhand.
     ///
@@ -786,11 +824,13 @@ mod tests {
                     dropped, dropped_streaming,
                     "{count} values, {outliers} outliers: the paths rejected different counts"
                 );
-                // Loose, because the two accumulate differently. What is being
-                // asserted is that they agree about the answer, not that they
-                // reach it the same way; the counts above are the strict part.
-                assert!(
-                    (mine - theirs).abs() <= 0.01,
+                // Exactly, not nearly. The two folded differently once and
+                // agreed only to within rounding, which left the keep-set
+                // depending on which path ran; they now accumulate the same way
+                // and there is nothing left for them to disagree about.
+                assert_eq!(
+                    mine.to_bits(),
+                    theirs.to_bits(),
                     "{count} values, {outliers} outliers: {mine} against {theirs}"
                 );
             }

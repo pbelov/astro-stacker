@@ -35,6 +35,51 @@ export function folderOf(path: string): string {
   return at > 0 ? path.slice(0, at) : "";
 }
 
+/**
+ * Путь в одном написании, для показа.
+ *
+ * Хранится он ровно таким, каким его дала система: его потом открывают. А на
+ * экран три пути подряд должны выходить одинаковыми, иначе строки одного рода
+ * выглядят пришедшими из разных программ. Сборка — единственная в Windows,
+ * так что написание — обратный слэш.
+ */
+export function shown(path: string): string {
+  return path.replace(/\//g, "\\");
+}
+
+/**
+ * Папка и имя в один путь, разделителем той самой папки.
+ *
+ * Не жёсткой косой чертой: папка приходит от системного диалога с обратными
+ * слэшами, и приклеенная к ней косая давала путь из двух написаний сразу.
+ */
+export function joined(folder: string, name: string): string {
+  if (!folder) return name;
+  const separator = folder.includes("\\") || !folder.includes("/") ? "\\" : "/";
+  return folder + separator + name;
+}
+
+/**
+ * Укороченный путь для узкой строки.
+ *
+ * Режется по разделителю, а не по числу знаков: обрезанный посередине имени
+ * папки путь читается как испорченный текст, а выброшенные целиком папки — как
+ * путь. Хвост сохраняется целиком, потому что имя файла и есть то, что ищут
+ * глазами.
+ */
+export function shortened(path: string, keep = 46): string {
+  const full = shown(path);
+  if (full.length <= keep) return full;
+  const parts = full.split("\\");
+  let tail = parts[parts.length - 1] ?? full;
+  for (let index = parts.length - 2; index > 0; index -= 1) {
+    const wider = parts[index] + "\\" + tail;
+    if (wider.length + 1 > keep) break;
+    tail = wider;
+  }
+  return "…\\" + tail;
+}
+
 /** Запомнить папку, из которой брали кадры этого вида. */
 export function remember(feed: string, folder: string): void {
   if (!folder) return;

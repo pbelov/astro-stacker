@@ -8,27 +8,8 @@ rediscovering why it was written down.
 
 ## Defects
 
-### The two combination paths find the centre by different arithmetic
-
-The in-memory path takes an exact sum in `clipped_mean`; the streaming path
-folds Welford. The two agree to within rounding, which is enough for the centre
-itself and not enough for the keep-set: about one photosite in twenty thousand
-lands on the other side of the threshold depending on which path ran, and which
-path runs is decided by how much memory the session needs. The same frames can
-therefore produce two slightly different masters.
-
-The fix is to fold Welford inside `clipped_mean` too, trading a marginally more
-accurate estimator for an identical one — agreement between the paths is worth
-more here than the last bit of accuracy, because a result that depends on
-available memory cannot be reasoned about.
-
-Left at 0.18.0 because it moves results, and that release had already moved them
-once. Worth folding into the next change that moves them anyway rather than
-spending a release of its own.
-
-Done when a session small enough for either path produces a byte-identical
-master through both, and a test pins it.
-
+None open. The heading stays because the list being empty is worth saying:
+it reads differently from a section nobody has written yet.
 
 ## The window
 
@@ -65,80 +46,6 @@ Done when the window has no scrollbar of its own at any size it can be opened
 at, when every control is on the left and nothing on the right is a control, and
 when narrowing the window rearranges rather than clips.
 
-### Stop the window behaving like a browser page
-
-Right-click anywhere and WebView2's own menu appears — Back, Reload, Save as,
-View source. Drag across a label and it selects like text on a page. Press F5
-and the whole thing reloads. None of that belongs in a program that is supposed
-to look like it was written for the desktop, and each one tells the user what is
-under the hood at the moment they least need to know.
-
-Nothing is handled today: there is no `contextmenu` handler, no `keydown`
-handler and no `user-select` rule anywhere in `apps/desktop/src`. Page zoom is
-the exception — `zoomHotkeysEnabled` defaults to false and our config does not
-turn it on — but that covers the keys, not `ctrl`+wheel, so it is worth checking
-rather than assuming.
-
-The sibling star-trails has done this, and two things it learned are worth
-copying rather than rediscovering — `App.svelte`, around the `contextmenu`
-listener:
-
-* **Match on `e.code`, not `e.key`.** WebView2 fires its accelerators by
-  physical key whatever the layout, so on ЙЦУКЕН `ctrl`+A arrives as `ctrl`+«ф»
-  by `e.key` and a handler keyed on the letter simply misses. Their blocked set
-  is physical: `KeyA F G P R S O U J L`, `Equal Minus Digit0` and the numpad
-  three, `F3 F5 F7`, and `alt`+arrows for history.
-* **A lone `alt`, pressed and released, puts the window into menu mode.** Windows
-  enters its own message loop and the webview stops delivering pointer events
-  until the next click. There is no menu on this window at all, so both keydown
-  and keyup for a bare `alt` are swallowed there. `alt` as a modifier is
-  untouched, because the system sets `altKey` on mouse events rather than these
-  handlers.
-
-The part to get right is what stays. Turning selection off everywhere would be
-worse than the disease: a user has to be able to take a path, an error message
-or a line of the third-party notices with them. So `user-select: none` belongs
-on the frame — labels, buttons, headings — and `user-select: text` goes back
-explicitly on the content that is data, which is how the sibling does it too.
-Copy has to keep working wherever selection does.
-
-Blocking a key is also claiming it. `ctrl`+O and `ctrl`+S are on the list, and
-those are the two a project file will want the moment sessions can be saved, so
-this entry and that one should agree on who gets them.
-
-Done when right-click does nothing, when no key reloads, prints, finds or
-opens a browser dialog, when dragging across the window does not paint a
-selection over labels, and when a path, an error and the notices can still be
-selected and copied.
-
-### Paths are shown with whichever slashes they happened to arrive with
-
-The three result files sit in one column under "Where to save", and the column
-shows two conventions at once: a path the save dialog returned keeps Windows
-backslashes, while a path the window proposed carries a forward slash where it
-was joined. Nothing is broken by it — Windows takes either — but three lines of
-the same kind of thing should not look like they came from two programs.
-
-The cause is a hardcoded separator in two places in `Stack.svelte`: `propose`
-builds the names the user did not pick as `${folder}/${name}${suffix}`, and
-`choose` builds the dialog's `defaultPath` the same way, while `folder` comes
-from `folderOf`, which deliberately preserves whatever separators it was given.
-So the moment one file is picked, the other two are proposed as a mixture.
-
-Display and storage are different questions here and both want an answer. What
-is kept should stay exactly as the OS gave it, because it is what gets opened;
-what is shown should be one convention, chosen once. Windows writes backslashes,
-so that is the one to show on Windows.
-
-Worth doing together with the shortening in the same row: `short` cuts a path at
-a fixed number of characters, so it lands mid-segment and produces
-`…ain6\…`. Cutting at a separator instead would drop whole folders and read
-as a path rather than as a string that got clipped.
-
-Done when the three rows show one convention whatever order the files were named
-in, when what is passed to the stacker is still the path the OS gave, and when a
-shortened path begins at a folder boundary.
-
 ### The role cards take more room than they earn, and files are the awkward way in
 
 The five cards for lights, darks, flats, biases and dark-flats are each a
@@ -152,62 +59,6 @@ worth stacking are a hand-picked subset is not an exception.
 
 Done when the five cards together take about half the height they do now, and
 when choosing files is not visibly the lesser of the two ways in.
-
-### Stack first, decide what to keep afterwards
-
-Today the stacking step refuses to start until at least one output file has been
-named. The order is backwards: naming three files is a decision about what to
-keep, and it is being asked before there is anything to keep or any way to tell
-whether it is worth keeping. What should happen is that the run starts on the
-frames alone, and when it ends the result appears — on a step of its own — with
-a button per output offering to save it.
-
-**This reverses a refusal that was put in on purpose**, and the reason is in the
-code beside it: a stack of a few hundred frames is minutes of work, and finding
-out at the end that it was written nowhere is the worst moment to be told. The
-new shape answers that better than the refusal did, but only if it holds to one
-rule — **the result stays in memory after the run, and the buttons write from
-it**. If saving re-runs anything, the refusal was right and this is worse.
-
-The code is already most of the way there, which is worth knowing before
-estimating this:
-
-* `combine` returns `Stacked` — the planes, in memory. `write` is already a
-  separate function taking that plus the chosen paths.
-* `write` already builds each output only when it is asked for: the linear TIFF
-  costs another pass over every pixel and a run that wants only the FITS does
-  not pay for it. That is exactly the behaviour three buttons want.
-* The preview is already kept on `Running` and already comes from the same
-  levelled copy the stretched TIFF does, so the window and the file agree.
-
-What has to change is where the result lives between the run and the button.
-`write` takes `&Selection<'_>`, which borrows from the survey, so it cannot be
-parked in `Running` as it is. What it actually uses from there is small — the
-first frame's camera model, exposure, ISO and layout — so lifting those into an
-owned header struct dissolves the borrow rather than fighting it.
-
-The cost is memory, and it should be stated rather than discovered: `Stacked`
-holds one `f32` plane per colour plus one coverage plane per colour, so a 45
-megapixel stack is about 540 MB of planes and as much again of coverage. Worth
-checking whether coverage is needed once the run has finished — if it is not,
-dropping it halves what is held.
-
-When it is dropped follows the precedent already set by the held masters of a
-stopped measurement: the moment it cannot serve. A new run, or a change to what
-is being stacked, and it goes. Saving must not drop it — FITS now and the view
-TIFF five minutes later is an ordinary thing to want. And since what is held is
-minutes of work, throwing it away deserves to be said out loud: closing the
-window or starting another run with a result unsaved should ask.
-
-The step itself is a fourth: frames, quality, stacking, result. That collides
-with the layout rework, which leaves open whether two of the existing steps
-merge, so the two entries want designing together rather than in sequence.
-
-Done when a stack can be started with nothing named, when the result appears on
-its own step with what it is made of, when each of the three files can be
-written from it afterwards in any order and more than once, when nothing is
-recomputed except the output being written, and when an unsaved result is not
-lost silently.
 
 ### Name the frames that are not lights, and offer to refile them
 
@@ -279,12 +130,10 @@ rounding error beside them. Whether those ratios are stable enough to carry one
 figure across the whole run is a question to settle by measuring a real run, not
 by reasoning.
 
-Four stages, not five, if "Stack first, decide what to keep afterwards" lands
-before this: writing leaves the run and becomes a button. That removes the one
-stage whose cost depends on which files were named rather than on how many
-frames there are, so it makes the estimate easier rather than harder. Each save
-then wants its own small figure, and the pass over every pixel a linear TIFF
-costs is the one worth showing.
+Four stages now, not five: writing left the run and became a button, which
+removed the one stage whose cost depended on which files were named rather than
+on how many frames there are. Each save wants its own small figure instead, and
+the pass over every pixel that a linear TIFF costs is the one worth showing.
 
 Done when the stacking step shows a time that does not jump about, when a run
 with rejection is not estimated as though it had one pass, and when `stackSlow`
@@ -345,49 +194,23 @@ named and the program's own data, and when closing with unsaved work says so.
 
 ## The result
 
-### Say how much light the stack actually holds
+### Say what a session holds before it is stacked
 
-Nothing anywhere says it. The result reports how many frames were stacked, how
-many were refused, and an effective count that discounts for uneven weights —
-but never the one number an astrophotographer states first about a night, which
-is how long the shutter was open in total. `scan` does not say it either, so a
-session's worth is not known before minutes are spent on it.
+The result now states its light — kept, shot and weighted, with the total in the
+FITS as `LIVETIME`. `scan` still does not: it reports the frames of a set, their
+exposure and their gain, and leaves the arithmetic to the reader. So the first
+question about a night — is there enough here to be worth the minutes — is the
+one the step before the minutes cannot answer.
 
-There is a trap in the way: `StackResultDto.seconds` already exists and is the
-wall-clock duration of the run — `started.elapsed()` — not integration time. Two
-fields called seconds, one meaning how long you waited and the other how much
-light you got, will be read wrongly by someone eventually, so the existing one
-wants renaming as part of this.
+Everything needed is already read at that point: `FrameRecord` carries
+`info.exposure_seconds` per frame, and the partition already groups them. What
+it wants is the same distinction the result makes, minus the ones about
+selection, which has not happened yet: what the set holds, and how much of it
+is in frames that are excluded or unreadable.
 
-The reason this is not one number is the reason it is worth doing carefully.
-Four are defensible and they are not equal:
-
-* **Shot** — every light in the set, whatever became of it. What the night cost.
-* **Kept** — the frames that survived selection. The headline, and what "3h 20m"
-  should mean when the window says it.
-* **Effective** — kept, discounted by weight. `effective` already does this for
-  the frame count, with the comment calling it the honest answer to how deep the
-  stack is; the same discount applied to time is the honest answer here.
-* **Per pixel** — and this is the one that stops a single figure being a lie.
-  Frames are deposited after alignment, so field rotation and drift leave the
-  edges covered by fewer frames than the middle. `Stacked.coverage` already
-  carries exactly that, per colour plane. Whatever headline is chosen must not
-  imply the depth is uniform across the frame, because it is not.
-
-Exposure per frame is `read.exposure_seconds` and it is an `Option`: a body that
-recorded nothing leaves a hole. Per this project's rule the sum then is a lower
-bound and has to say so, rather than quietly skipping the frame or inventing a
-value for it.
-
-It belongs in the FITS header too, not only on screen. Other programs read that
-header, and a stack whose total integration has to be recovered by multiplying
-two other keywords is a stack that will be quoted wrongly.
-
-Done when the stacking result states the kept total in a form a person would say
-out loud, when the effective figure sits beside it rather than replacing it,
-when a frame with no recorded exposure makes the total admit it is a floor, when
-the FITS carries it, and when the scan step says what a session holds before it
-is stacked.
+Done when a scanned session says how long each set was exposed for in total,
+in the window and on the command line, and when a set with a frame that
+recorded no exposure says its figure is a floor.
 
 ### Quieten the colour grain in the view TIFF, and only there
 

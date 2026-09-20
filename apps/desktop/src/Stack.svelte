@@ -1,47 +1,17 @@
 <script lang="ts">
-  // Шаг «Сложение»: настройки, прогон и результат.
+  // Шаг «Сложение»: настройки и прогон. Результат — на своём шаге.
   //
   // Пороги здесь те же, что на шаге «Качество», и это намеренно: там они
   // выбираются, глядя на цену, здесь применяются. Одно и то же число в двух
   // местах с разными именами — верный способ потом не понять, какое из них
   // сработало.
+  //
+  // Файлы больше не называются до прогона. Прогон оставляет сложенный кадр в
+  // памяти, и шаг «Результат» пишет из него то, что человек решит оставить,
+  // посмотрев на картинку.
 
-  import { invoke, Channel } from "@tauri-apps/api/core";
-  import { save } from "@tauri-apps/plugin-dialog";
-  import { i18n, type Keys } from "./i18n.svelte";
-  import { folderOf } from "./places";
-
-  type Coverage = { filled: number; medianDepth: number; thinnest: number };
-  type StackedFrame = {
-    name: string;
-    weight: number;
-    brightness: number;
-    trail: number;
-    fwhm: number;
-    shift: number;
-  };
-  type Result = {
-    frames: StackedFrame[];
-    refused: { name: string; reason: string }[];
-    effective: number;
-    stacked: number;
-    width: number;
-    height: number;
-    seconds: number;
-    coverage: Coverage[];
-    written: string[];
-    rejected: [number, number] | null;
-    heavyLosses: [string, number][];
-    previewWidth: number;
-    previewHeight: number;
-    note: string;
-  };
-  type Progress =
-    | { stage: "master"; kind: string; done: number; total: number }
-    | { stage: "frame"; done: number; total: number; name: string }
-    | { stage: "aligning" }
-    | { stage: "stacking"; pass: number; passes: number; done: number; total: number; name: string }
-    | { stage: "writing" };
+  import { i18n } from "./i18n.svelte";
+  import { stacking } from "./stacking.svelte";
 
   let {
     roots,
@@ -50,6 +20,7 @@
     raw = false,
     kindName,
     trim,
+    onFinished,
   }: {
     roots: Record<string, string[]>;
     sigma?: number;
@@ -57,6 +28,7 @@
     raw?: boolean;
     kindName: (kind: string) => string;
     trim: (value: number, decimals?: number) => string;
+    onFinished: () => void;
   } = $props();
 
   let sharpness = $state(0.5);
@@ -66,169 +38,46 @@
   let pixfrac = $state(1);
   let reject = $state(false);
   let kappa = $state(3);
-  // Три результата, каждый со своим именем. Раньше спрашивалась папка, а имена
-  // внутри были жёсткие, и второй прогон той же ночи молча затирал первый.
-  type Output = "fits" | "tiff" | "view";
-  const OUTPUTS: { id: Output; label: Keys; suffix: string; ext: string }[] = [
-    { id: "fits", label: "outFits", suffix: ".fits", ext: "fits" },
-    { id: "tiff", label: "outTiff", suffix: ".tif", ext: "tif" },
-    { id: "view", label: "outView", suffix: "-view.tif", ext: "tif" },
-  ];
-  let out = $state<Record<Output, string>>({ fits: "", tiff: "", view: "" });
 
-  let running = $state(false);
-  let progress = $state<Progress | null>(null);
-  let result = $state<Result | null>(null);
-  let error = $state("");
-  let canvas = $state<HTMLCanvasElement | null>(null);
-
-  const ready = $derived(OUTPUTS.some((o) => out[o.id].length > 0) && !running);
-
-  /**
-   * Путь, укороченный с начала: имя файла важнее того, где он лежит.
-   *
-   * Обрезка здесь, а не `direction: rtl` в стилях: тот приём переставляет
-   * слэши и двоеточие как слабые символы, и `D:/main/x.fits` показывается
-   * не тем путём, который выбран. Целиком он всё равно виден по наведению.
-   */
-  const short = (path: string, keep = 46) =>
-    path.length <= keep ? path : "…" + path.slice(path.length - keep + 1);
-
-  /** Папка, в которой разумно открыть диалог: где уже что-то выбрано, иначе где лайты. */
-  const startingFolder = $derived.by(() => {
-    const already = OUTPUTS.map((o) => out[o.id]).find((p) => p.length > 0);
-    if (already) return folderOf(already);
-    const light = roots.lights?.[0];
-    if (!light) return "";
-    // Лайты теперь могут быть и отдельными файлами: точка в последнем сегменте
-    // означает имя файла, а не папку.
-    const tail = light.split(/[\\/]/).pop() ?? "";
-    return tail.includes(".") ? folderOf(light) : light;
-  });
-
-  async function choose(kind: Output) {
-    const spec = OUTPUTS.find((o) => o.id === kind)!;
-    const folder = startingFolder;
-    const stem = stemOf() ?? "stack";
-    const picked = await save({
-      title: i18n.t(spec.label),
-      defaultPath: folder ? `${folder}/${stem}${spec.suffix}` : `${stem}${spec.suffix}`,
-      filters: [{ name: spec.ext.toUpperCase(), extensions: [spec.ext] }],
-    });
-    if (typeof picked !== "string") return;
-    out[kind] = picked;
-    propose(picked);
-  }
-
-  /** Общее имя, если оно уже выбрано: второй диалог не должен начинаться с нуля. */
-  function stemOf(): string | null {
-    for (const o of OUTPUTS) {
-      const path = out[o.id];
-      if (!path) continue;
-      const name = path.split(/[\\/]/).pop() ?? "";
-      return name.replace(/\.[^.]*$/, "").replace(/-view$/, "");
-    }
-    return null;
-  }
-
-  /**
-   * Выбрал одно — остальные предложены рядом.
-   *
-   * Три диалога вместо одного выбора папки — это больше кликов, а не меньше,
-   * если каждый надо пройти. Поэтому первый выбор задаёт папку и имя для
-   * остальных; любое из них потом меняется своим диалогом или убирается.
-   */
-  function propose(picked: string) {
-    const folder = folderOf(picked);
-    const name = (picked.split(/[\\/]/).pop() ?? "").replace(/\.[^.]*$/, "").replace(/-view$/, "");
-    for (const o of OUTPUTS) {
-      if (out[o.id]) continue;
-      out[o.id] = folder ? `${folder}/${name}${o.suffix}` : `${name}${o.suffix}`;
-    }
-  }
+  const running = $derived(stacking.running);
+  const progress = $derived(stacking.progress);
+  const error = $derived(stacking.error);
+  const done = $derived(stacking.result !== null && stacking.isOf(roots));
+  const ready = $derived(Object.values(roots).some((paths) => paths.length > 0) && !running);
 
   async function run() {
     if (!ready) return;
-    running = true;
-    error = "";
-    result = null;
-    progress = null;
-    const channel = new Channel<Progress>();
-    channel.onmessage = (message) => (progress = message);
-    try {
-      const produced = await invoke<Result>("stack_run", {
-        roots,
-        sigma,
-        maxStars,
-        raw,
-        sharpness,
-        maxTrail,
-        maxFwhm,
-        maxShift,
-        pixfrac,
-        reject,
-        kappa,
-        // Незаполненное — это «не сохранять», а не пустая строка.
-        out: Object.fromEntries(OUTPUTS.map((o) => [o.id, out[o.id] || null])),
-        on: channel,
-      });
-      result = produced;
-      await draw(produced);
-    } catch (thrown) {
-      error = String(thrown);
-    } finally {
-      running = false;
-      progress = null;
-    }
+    const finished = await stacking.run(roots, {
+      sigma,
+      maxStars,
+      raw,
+      sharpness,
+      maxTrail,
+      maxFwhm,
+      maxShift,
+      pixfrac,
+      reject,
+      kappa,
+    });
+    // Ушло минуты работы: показать результат надо самому, а не ждать, пока
+    // человек догадается перейти на соседний шаг.
+    if (finished) onFinished();
   }
-
-  function stop() {
-    void invoke("cancel");
-  }
-
-  /**
-   * Превью приходит сырыми байтами RGBA отдельной командой: та же картинка в
-   * виде массива чисел в JSON вышла бы на порядок больше и разбиралась бы по
-   * байту.
-   */
-  async function draw(produced: Result) {
-    const bytes = await invoke<ArrayBuffer>("stack_preview");
-    const target = canvas;
-    if (!target) return;
-    target.width = produced.previewWidth;
-    target.height = produced.previewHeight;
-    const context = target.getContext("2d");
-    if (!context) return;
-    const data = new Uint8ClampedArray(bytes);
-    if (data.length < produced.previewWidth * produced.previewHeight * 4) return;
-    context.putImageData(
-      new ImageData(data, produced.previewWidth, produced.previewHeight),
-      0,
-      0,
-    );
-  }
-
-  const number = (value: number, decimals = 2) =>
-    Number.isFinite(value) ? trim(value, decimals) : "—";
 
   const share = $derived.by(() => {
     if (progress === null) return 0;
-    if (progress.stage === "aligning" || progress.stage === "writing") return 1;
+    if (progress.stage === "aligning" || progress.stage === "finishing") return 1;
     return progress.total > 0 ? progress.done / progress.total : 0;
   });
-
-  const worst = $derived(
-    result ? [...result.frames].sort((a, b) => a.weight - b.weight).slice(0, 8) : [],
-  );
 </script>
 
 <header class="bar">
   <h1>{i18n.t("stepStack")}</h1>
   {#if running}
-    <button class="ghost" onclick={stop}>{i18n.t("stop")}</button>
+    <button class="ghost" onclick={() => stacking.stop()}>{i18n.t("stop")}</button>
   {:else}
     <button class="primary" disabled={!ready} onclick={run}>
-      {result ? i18n.t("stackAgain") : i18n.t("stackRun")}
+      {done ? i18n.t("stackAgain") : i18n.t("stackRun")}
     </button>
   {/if}
 </header>
@@ -296,28 +145,6 @@
     {/if}
   </div>
   <p class="dim">{i18n.t("rejectHint")}</p>
-
-  <div class="outputs">
-    <h3>{i18n.t("outFiles")}</h3>
-    {#each OUTPUTS as spec (spec.id)}
-      <div class="row out">
-        <span class="what">{i18n.t(spec.label)}</span>
-        <span class="path num" class:muted={!out[spec.id]} title={out[spec.id]}>
-          {out[spec.id] ? short(out[spec.id]) : i18n.t("outNotSet")}
-        </span>
-        <button class="ghost" onclick={() => choose(spec.id)}>{i18n.t("choose")}</button>
-        <button
-          class="ghost drop"
-          disabled={!out[spec.id]}
-          title={i18n.t("clear")}
-          onclick={() => (out[spec.id] = "")}>×</button
-        >
-      </div>
-    {/each}
-    {#if !OUTPUTS.some((o) => out[o.id])}
-      <p class="dim">{i18n.t("outNothingNamed")}</p>
-    {/if}
-  </div>
 </section>
 
 {#if running}
@@ -349,7 +176,7 @@
           · {i18n.t("passOf", { pass: progress.pass, passes: progress.passes })}
         {/if}
       {:else}
-        {i18n.t("writing")}
+        {i18n.t("finishing")}
       {/if}
     </p>
     <p class="dim">{i18n.t("stackSlow")}</p>
@@ -363,130 +190,9 @@
   </section>
 {/if}
 
-<section class="card preview" class:empty={!result}>
-  <h2>{i18n.t("theResult")}</h2>
-  <canvas bind:this={canvas}></canvas>
-  {#if !result}
-    <p class="dim">{i18n.t("noResultYet")}</p>
-  {:else}
-    <p class="dim">{result.note}</p>
-  {/if}
-</section>
-
-{#if result}
+{#if done && !running}
   <section class="card">
-    <h2>{i18n.t("whatWasStacked")}</h2>
-    <table class="num stats">
-      <tbody>
-        <tr>
-          <td class="dim">{i18n.t("statFrames")}</td>
-          <td><strong>{result.stacked}</strong></td>
-          <td class="muted">
-            {i18n.t("effectiveDepth", { n: result.effective })}
-          </td>
-        </tr>
-        <tr>
-          <td class="dim">{i18n.t("statCanvas")}</td>
-          <td class="num">{result.width} × {result.height}</td>
-          <td class="muted">{trim((result.width * result.height) / 1e6, 1)} Mpx</td>
-        </tr>
-        <tr>
-          <td class="dim">{i18n.t("statTook")}</td>
-          <td>{trim(result.seconds, 1)} {i18n.t("seconds")}</td>
-          <td></td>
-        </tr>
-      </tbody>
-    </table>
-
-    <!-- По плоскостям, а не одной цифрой: зелёных фотосайтов вдвое больше, и
-         средняя по всем трём польстила бы результату. Красная показывает,
-         хватило ли дизеринга. -->
-    <h3>{i18n.t("coverage")}</h3>
-    <table class="num stats">
-      <tbody>
-        {#each result.coverage as plane, index (index)}
-          <tr>
-            <td class="dim">{["R", "G", "B"][index] ?? index}</td>
-            <td>{trim(plane.filled, 1)}%</td>
-            <td class="muted">
-              {i18n.t("depthAt", {
-                median: trim(plane.medianDepth, 1),
-                thin: trim(plane.thinnest, 1),
-              })}
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-
-    {#if result.rejected}
-      <h3>{i18n.t("refused")}</h3>
-      <p class="num">
-        {i18n.t("rejectedShare", {
-          share: trim((result.rejected[0] / Math.max(1, result.rejected[1])) * 100, 3),
-          dropped: result.rejected[0],
-          considered: result.rejected[1],
-        })}
-      </p>
-      {#if result.heavyLosses.length > 0}
-        <p class="warning">{i18n.t("heavyLosses")}</p>
-        <ul class="plain">
-          {#each result.heavyLosses as [name, share] (name)}
-            <li class="warning">
-              <span class="dim">{name}</span>
-              {i18n.t("lostShare", { share: trim(share * 100, 1) })}
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    {/if}
-
-    <h3>{i18n.t("written")}</h3>
-    <ul class="plain">
-      {#each result.written as path (path)}
-        <li class="dim">{path}</li>
-      {/each}
-    </ul>
-  </section>
-
-  {#if result.refused.length > 0}
-    <section class="card">
-      <h2>{i18n.t("refused")} ({result.refused.length})</h2>
-      <ul class="plain scroll">
-        {#each result.refused as frame (frame.name)}
-          <li><span class="dim">{frame.name}</span> — {frame.reason}</li>
-        {/each}
-      </ul>
-    </section>
-  {/if}
-
-  <section class="card">
-    <h2>{i18n.t("lightestWeights")}</h2>
-    <p class="muted">{i18n.t("lightestHint")}</p>
-    <table class="num frames">
-      <thead>
-        <tr>
-          <th>{i18n.t("colFrame")}</th>
-          <th>{i18n.t("colWeight")}</th>
-          <th>{i18n.t("colBrightness")}</th>
-          <th>{i18n.t("colTrail")}</th>
-          <th>{i18n.t("colFwhm")}</th>
-          <th>{i18n.t("colShift")}</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each worst as frame (frame.name)}
-          <tr>
-            <td class="name">{frame.name}</td>
-            <td><strong>{number(frame.weight, 3)}</strong></td>
-            <td class="muted">{number(frame.brightness, 3)}</td>
-            <td class="muted">{number(frame.trail)}</td>
-            <td class="muted">{number(frame.fwhm)}</td>
-            <td class="muted">{number(frame.shift, 0)}</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
+    <p class="muted">{i18n.t("resultWaiting")}</p>
   </section>
 {/if}
 
@@ -554,48 +260,6 @@
     margin-top: 12px;
   }
 
-  .outputs {
-    margin-top: 14px;
-    padding-top: 12px;
-    border-top: 1px solid var(--line);
-  }
-  .outputs h3 {
-    margin: 0 0 6px;
-    font-size: 13px;
-    color: var(--dim);
-    font-weight: 600;
-  }
-  .out {
-    gap: 10px;
-  }
-  /* Три строки одной формы, так что подписи выровнены по колонке: иначе пути
-     начинаются в разных местах и читаются как разные вещи. */
-  .what {
-    width: 12em;
-    flex: none;
-    font-size: 13px;
-  }
-  .path {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 12px;
-  }
-  /* Ширина задана в 2em, поэтому боковые отступы общей кнопки сюда не
-     помещаются: содержимое - один знак. */
-  .drop {
-    width: 2em;
-    flex: none;
-    line-height: 1;
-    padding-inline: 0;
-  }
-  .drop:disabled {
-    opacity: 0.3;
-    cursor: default;
-    border-color: transparent;
-  }
-
   .track {
     height: 6px;
     border-radius: 3px;
@@ -607,49 +271,5 @@
     height: 100%;
     background: var(--accent);
     transition: width 0.15s linear;
-  }
-
-  .preview canvas {
-    display: block;
-    width: 100%;
-    height: auto;
-    border-radius: var(--radius);
-    background: var(--photo-bg);
-    /* Пиксели превью крупные; сглаживание браузера тут честнее, чем ступеньки. */
-    image-rendering: auto;
-  }
-  .preview.empty canvas {
-    min-height: 160px;
-  }
-
-  .stats td {
-    padding: 2px 14px 2px 0;
-    border: none;
-  }
-  .stats td:first-child {
-    width: 8em;
-  }
-
-  .frames {
-    width: 100%;
-  }
-  .frames th {
-    text-align: left;
-    font-weight: 600;
-    color: var(--dim);
-    font-size: 12px;
-    padding: 0 10px 4px 0;
-  }
-  .frames td {
-    padding: 2px 10px 2px 0;
-    border-bottom: 1px solid var(--line);
-  }
-  .frames .name {
-    color: var(--text);
-  }
-
-  .scroll {
-    max-height: 190px;
-    overflow-y: auto;
   }
 </style>

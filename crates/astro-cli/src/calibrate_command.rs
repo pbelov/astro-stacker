@@ -141,6 +141,8 @@ fn calibrate_one(
         exposure: session[id].info.exposure_seconds,
         iso: session[id].info.iso,
         frames: 1,
+        // One frame, so its own exposure is the whole of it.
+        integration: session[id].info.exposure_seconds,
         combination: "calibrated".to_owned(),
         bayer_pattern: astro_core::cfa_pattern_name(frame.layout()),
         notes: vec![describe(masters)],

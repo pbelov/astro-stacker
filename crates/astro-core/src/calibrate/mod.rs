@@ -131,6 +131,9 @@ impl Master {
             exposure: self.info.exposure_seconds,
             iso: self.info.iso,
             frames: self.frames,
+            // A master's frames share one exposure by construction: the set is
+            // grouped by it. So the product is the total rather than a guess.
+            integration: self.info.exposure_seconds.map(|each| each * self.frames as f64),
             combination: self.method.name().to_owned(),
             bayer_pattern: crate::frame::cfa_pattern_name(&self.layout),
             notes,

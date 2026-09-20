@@ -89,6 +89,25 @@ pub struct Selection<'a> {
     pub centre: (f64, f64),
 }
 
+/// Seconds of light a set of chosen frames holds, and how many did not say.
+///
+/// Not the frame count times one exposure: a run can mix lengths, and the
+/// frames that were refused must not be counted at all. A frame that recorded
+/// no exposure is counted in the second number rather than given a plausible
+/// one, which leaves the total a floor and lets the caller say so instead of
+/// quietly understating the night.
+pub fn integration(frames: &[Chosen<'_>]) -> (f64, usize) {
+    let mut seconds = 0.0;
+    let mut unrecorded = 0;
+    for frame in frames {
+        match frame.read.exposure_seconds {
+            Some(each) => seconds += each,
+            None => unrecorded += 1,
+        }
+    }
+    (seconds, unrecorded)
+}
+
 /// Picks the frames, measures their brightness against the reference and weighs
 /// them.
 pub fn select<'a>(alignment: &'a Alignment<'a>, options: &StackOptions) -> Selection<'a> {

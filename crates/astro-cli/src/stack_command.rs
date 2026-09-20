@@ -291,6 +291,12 @@ fn write_result(
         exposure: first.read.exposure_seconds,
         iso: first.read.iso,
         frames: stacked.frames,
+        integration: {
+            let (seconds, unrecorded) = astro_core::pipeline::stack::integration(&selection.frames);
+            // Every frame silent about its exposure means there is nothing to
+            // report; some of them means a floor, and the note below says so.
+            (unrecorded < selection.frames.len()).then_some(seconds)
+        },
         combination: format!("weighted mean, sharpness {}", args.sharpness),
         // Deliberately absent: the planes are already separated by colour, so a
         // reader that debayered them would be debayering three images that have
