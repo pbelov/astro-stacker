@@ -86,6 +86,11 @@ rem уборки не касается. Убирается заранее, ин�
 rem версии, а zip собрался бы поверх них и увёз бы их с собой.
 if not exist "%OUT%" mkdir "%OUT%"
 for /d %%d in ("%OUT%\astro-stacker_*_x64") do rd /s /q "%%~d"
+rem archive\latest очищается здесь, а наполняется в конце: пусто после
+rem неудачной сборки честнее, чем прошлая версия под именем «последняя».
+rem Сама версия при этом остаётся в архиве под своим номером, так что
+rem очистка ничего не теряет.
+if exist "archive\latest" rd /s /q "archive\latest"
 del /f /q "%OUT%\astro-stacker_*_x64.zip" >nul 2>&1
 if exist "%ZIP%" (
   echo [ОШИБКА] не удалось удалить %ZIP%
@@ -255,6 +260,14 @@ if defined DIRTY set "COMMIT=!COMMIT! + незакоммиченные прав�
   echo собрано: %DATE% %TIME:~0,5%
 )
 
+rem В latest копируется уже архивная копия, а не сборка: так туда попадает
+rem и build.txt, и она байт в байт та же, что лежит под своим номером.
+xcopy "%ARCHIVE%" "archive\latest\" /e /i /q /y >nul
+if not "%ERRORLEVEL%"=="0" (
+  echo [ОШИБКА] не удалось скопировать сборку в archive\latest
+  exit /b 1
+)
+
 rem Размер считается и печатается, чтобы растущий архив не стал открытием:
 rem около двадцати мегабайт на версию, и никто их не подчищает.
 rem
@@ -265,8 +278,10 @@ rem ищет папку рядом с каждой папкой репозито
 rem она и так внутри двойных кавычек аргумента.
 set "KEPT=?"
 set "TOTALMB=?"
-for /f "delims=" %%n in ('powershell -NoProfile -Command "(Get-ChildItem -Directory 'archive').Count"') do set "KEPT=%%n"
-for /f "delims=" %%m in ('powershell -NoProfile -Command "[int]((Get-ChildItem -Recurse -File 'archive' | Measure-Object Length -Sum).Sum/1MB)"') do set "TOTALMB=%%m"
+rem latest из обоих чисел исключается: это копия версии, стоящей рядом, и
+rem посчитанная отдельной сборкой она завысила бы и счёт, и мегабайты.
+for /f "delims=" %%n in ('powershell -NoProfile -Command "(Get-ChildItem -Directory 'archive' | Where-Object Name -ne 'latest').Count"') do set "KEPT=%%n"
+for /f "delims=" %%m in ('powershell -NoProfile -Command "[int]((Get-ChildItem -Directory 'archive' | Where-Object Name -ne 'latest' | Get-ChildItem -Recurse -File | Measure-Object Length -Sum).Sum/1MB)"') do set "TOTALMB=%%m"
 echo   версий в архиве: !KEPT!, занято !TOTALMB! МБ
 
 rem tar есть в Windows 10 и новее и умеет zip. PowerShell - запасной путь.
@@ -290,6 +305,7 @@ for %%f in ("%ZIP%") do (
 )
 echo   %STAGE%\  - распакованная папка, запускается прямо из неё
 echo   archive\  - все собранные версии, каждая запускается оттуда же
+echo   archive\latest\  - копия этой сборки, под неизменным именем
 echo.
 echo   astro-stacker.exe --help          список команд
 echo   astro-stacker.exe formats         какие форматы читаются
